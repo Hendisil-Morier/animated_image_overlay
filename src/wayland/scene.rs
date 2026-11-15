@@ -44,18 +44,23 @@ use crate::{
 // Dedicated 4 KiB pool capacity backing the 1x1 transparent parent layer buffer.
 const PARENT_POOL_BYTES: usize = 4096;
 
-/// Maps clockwise overlay [`Rotation`] onto Wayland `wl_surface::set_buffer_transform`.
+/// Maps visual overlay `(rotation, flipped)` onto Wayland `wl_surface::set_buffer_transform`.
 ///
-/// Wayland compositors display the inverse of the surface buffer transform, so reporting a
-/// 90-degree counter-clockwise buffer (`Transform::_90`) renders rotated 90 degrees clockwise.
-pub fn wl_transform_for_rotation(rotation: Rotation) -> Transform
+/// Wayland compositors display the inverse of the surface buffer transform (`wl_output::transform`),
+/// where flipped variants flip horizontally around the vertical axis before counter-clockwise
+/// rotation (`inverse(R_ccw * F) = F * R_cw`).
+pub fn wl_transform_for_orientation(rotation: Rotation, flipped: bool) -> Transform
 {
-    match rotation
+    match (rotation, flipped)
     {
-        Rotation::Deg0 => Transform::Normal,
-        Rotation::Deg90 => Transform::_90,
-        Rotation::Deg180 => Transform::_180,
-        Rotation::Deg270 => Transform::_270,
+        (Rotation::Deg0, false) => Transform::Normal,
+        (Rotation::Deg90, false) => Transform::_90,
+        (Rotation::Deg180, false) => Transform::_180,
+        (Rotation::Deg270, false) => Transform::_270,
+        (Rotation::Deg0, true) => Transform::Flipped,
+        (Rotation::Deg90, true) => Transform::Flipped90,
+        (Rotation::Deg180, true) => Transform::Flipped180,
+        (Rotation::Deg270, true) => Transform::Flipped270,
     }
 }
 
@@ -116,6 +121,9 @@ pub(crate) struct OverlayScene
 
     // Cached last committed rotation applied to `image_surface`.
     last_rotation: Rotation,
+
+    // Cached last committed horizontal flip state applied to `image_surface`.
+    last_flipped: bool,
 
     // Cached last committed `wp_viewport` destination size on `image_surface`.
     last_image_dest: (i32, i32),
@@ -202,6 +210,7 @@ impl OverlayScene
             screen_height: sh,
             last_editing: false,
             last_rotation: Rotation::default(),
+            last_flipped: false,
             last_image_dest: (0, 0),
         })
     }
@@ -307,15 +316,18 @@ impl OverlayScene
         }
 
         let desired_rotation = layout.rotation();
-        if desired_rotation != self.last_rotation
+        let desired_flipped = layout.flipped();
+        if desired_rotation != self.last_rotation || desired_flipped != self.last_flipped
         {
             self.last_rotation = desired_rotation;
+            self.last_flipped = desired_flipped;
             if self.image_surface.version() >= 2
             {
-                let transform = wl_transform_for_rotation(desired_rotation);
+                let transform = wl_transform_for_orientation(desired_rotation, desired_flipped);
                 self.image_surface.set_buffer_transform(transform);
                 tracing::debug!(
                     ?desired_rotation,
+                    desired_flipped,
                     ?transform,
                     "Updated overlay buffer transform"
                 );

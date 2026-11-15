@@ -33,6 +33,30 @@ pub enum RotateDirection
     CounterClockwise,
 }
 
+impl RotateDirection
+{
+    /// Returns the opposite quarter-turn direction (`Clockwise` <-> `CounterClockwise`).
+    pub const fn reversed(self) -> Self
+    {
+        match self
+        {
+            Self::Clockwise => Self::CounterClockwise,
+            Self::CounterClockwise => Self::Clockwise,
+        }
+    }
+}
+
+/// Visual mirror axis applied across the displayed overlay bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlipAxis
+{
+    /// Mirror left-to-right across the vertical screen midline (`f`).
+    Horizontal,
+
+    /// Mirror top-to-bottom across the horizontal screen midline (`F`).
+    Vertical,
+}
+
 /// Clockwise 90-degree orientation applied visually to the overlay surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Rotation
@@ -66,6 +90,18 @@ impl Rotation
             (Self::Deg270, RotateDirection::CounterClockwise) => Self::Deg180,
             (Self::Deg180, RotateDirection::CounterClockwise) => Self::Deg90,
             (Self::Deg90, RotateDirection::CounterClockwise) => Self::Deg0,
+        }
+    }
+
+    /// Advances orientation by 180 degrees (`Deg0` <-> `Deg180`, `Deg90` <-> `Deg270`).
+    pub const fn rotated_half_turn(self) -> Self
+    {
+        match self
+        {
+            Self::Deg0 => Self::Deg180,
+            Self::Deg180 => Self::Deg0,
+            Self::Deg90 => Self::Deg270,
+            Self::Deg270 => Self::Deg90,
         }
     }
 
@@ -192,6 +228,12 @@ impl OverlayLayout
         self.state.rotation
     }
 
+    /// Returns whether the overlay is horizontally mirrored after rotating by `rotation()`.
+    pub fn flipped(&self) -> bool
+    {
+        self.state.flipped
+    }
+
     /// Returns the active monitor logical dimensions in pixels.
     pub fn screen_size(&self) -> (u32, u32)
     {
@@ -268,20 +310,39 @@ impl OverlayLayout
         self.clamp();
     }
 
-    /// Rotates the overlay by 90 degrees while keeping its visual center stationary inside bounds.
+    /// Rotates the overlay visually by 90 degrees while keeping its center stationary inside bounds.
     pub fn rotate(&mut self, direction: RotateDirection)
     {
         let (old_w, old_h) = self.overlay_size();
         let cx = self.state.x + f64::from(old_w) * 0.5;
         let cy = self.state.y + f64::from(old_h) * 0.5;
 
-        self.state.rotation = self.state.rotation.rotated(direction);
+        // Rotating a horizontally reflected view flips chirality under dihedral composition.
+        let effective_dir = if self.state.flipped
+        {
+            direction.reversed()
+        }
+        else
+        {
+            direction
+        };
+        self.state.rotation = self.state.rotation.rotated(effective_dir);
         self.clamp();
 
         let (new_w, new_h) = self.overlay_size();
         self.state.x = cx - f64::from(new_w) * 0.5;
         self.state.y = cy - f64::from(new_h) * 0.5;
         self.clamp();
+    }
+
+    /// Mirrors the visual overlay across `axis` while leaving bounding box coordinates unchanged.
+    pub fn flip(&mut self, axis: FlipAxis)
+    {
+        self.state.flipped = !self.state.flipped;
+        if axis == FlipAxis::Vertical
+        {
+            self.state.rotation = self.state.rotation.rotated_half_turn();
+        }
     }
 
     /// Applies vertical scroll wheel zooming (`scale *= 1.05 ** -dy`) and re-clamps.

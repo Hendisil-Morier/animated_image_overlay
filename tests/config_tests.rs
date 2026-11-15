@@ -71,6 +71,7 @@ fn config_recovers_valid_fields_and_ignores_corrupt_entries()
             y: DEFAULT_POS_Y,
             scale: DEFAULT_SCALE,
             rotation: Rotation::Deg0,
+            flipped: false,
         }
     );
 
@@ -98,6 +99,7 @@ fn config_save_state_entry_serializes_concurrent_writes_via_flock()
                 y: f64::from(idx as u32) * 20.0,
                 scale: 0.5 + f64::from(idx as u32) * 0.1,
                 rotation: Rotation::Deg0,
+                flipped: false,
             };
             store_ref
                 .save_state_entry(&key, state)
@@ -153,6 +155,7 @@ fn config_save_preserves_foreign_keys_and_reports_unwritable_dir()
                 y: DEFAULT_POS_Y,
                 scale: 0.9,
                 rotation: Rotation::Deg0,
+                flipped: false,
             },
         )
         .expect("save should succeed");
@@ -228,6 +231,7 @@ fn config_persists_quarter_turn_rotations_and_recovers_invalid_values()
             y: 240.0,
             scale: 0.75,
             rotation,
+            flipped: matches!(rotation, Rotation::Deg90 | Rotation::Deg270),
         };
         store
             .save_state_entry(key, state)
@@ -237,15 +241,26 @@ fn config_persists_quarter_turn_rotations_and_recovers_invalid_values()
         let raw = fs::read_to_string(&cfg_path).expect("saved config readable");
         let parsed: Map<String, Value> = serde_json::from_str(&raw).expect("valid JSON object");
         assert_eq!(parsed[key]["rotation"], Value::from(expected_deg));
+        assert_eq!(parsed[key]["flipped"], Value::Bool(state.flipped));
     }
 
     let seed = r#"{
         "/legacy.png": {"x": 300, "y": 400, "scale": 1.25},
+        "/flipped_only.png": {"x": 305, "y": 405, "scale": 1.1, "flipped": true},
+        "/bad_flip.png": {"x": 306, "y": 406, "scale": 1.1, "rotation": 90, "flipped": "yes"},
         "/non_quarter.png": {"x": 310, "y": 410, "scale": 1.5, "rotation": 45},
         "/negative.png": {"x": 320, "y": 420, "scale": 0.8, "rotation": -90},
         "/string_rot.png": {"x": 330, "y": 430, "scale": 0.9, "rotation": "90"}
     }"#;
     fs::write(&cfg_path, seed).expect("seed config written");
+
+    let flipped_only = store.load_state_entry("/flipped_only.png");
+    assert_eq!(flipped_only.rotation, Rotation::Deg0);
+    assert!(flipped_only.flipped);
+
+    let bad_flip = store.load_state_entry("/bad_flip.png");
+    assert_eq!(bad_flip.rotation, Rotation::Deg90);
+    assert!(!bad_flip.flipped);
 
     for (key, x) in [
         ("/legacy.png", 300.0),
@@ -257,6 +272,7 @@ fn config_persists_quarter_turn_rotations_and_recovers_invalid_values()
         let loaded = store.load_state_entry(key);
         assert_eq!(loaded.x, x);
         assert_eq!(loaded.rotation, Rotation::Deg0);
+        assert!(!loaded.flipped);
     }
 
     let invalid_serde: Result<OverlayState, _> =

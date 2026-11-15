@@ -3,8 +3,8 @@
 use animated_image_widget::{
     config::OverlayState,
     layout::{
-        HANDLE_SIZE, LogicalRect, MIN_OVERLAY_SIZE, OverlayLayout, RotateDirection, Rotation,
-        SCROLL_ZOOM_BASE,
+        FlipAxis, HANDLE_SIZE, LogicalRect, MIN_OVERLAY_SIZE, OverlayLayout, RotateDirection,
+        Rotation, SCROLL_ZOOM_BASE,
     },
 };
 
@@ -21,6 +21,7 @@ fn layout_clamps_scale_and_coordinates_within_monitor()
             y: -20.0,
             scale: 10.0,
             rotation: Rotation::Deg0,
+            flipped: false,
         },
     );
 
@@ -49,6 +50,7 @@ fn layout_drag_move_and_resize_preserve_top_left_and_bounds()
             y: 120.0,
             scale: 1.0,
             rotation: Rotation::Deg0,
+            flipped: false,
         },
     );
 
@@ -77,6 +79,7 @@ fn layout_scroll_zoom_matches_exponential_factor()
             y: 50.0,
             scale: 0.5,
             rotation: Rotation::Deg0,
+            flipped: false,
         },
     );
 
@@ -98,6 +101,7 @@ fn layout_computes_passive_handle_and_edit_input_regions()
             y: 200.0,
             scale: 1.0,
             rotation: Rotation::Deg0,
+            flipped: false,
         },
     );
 
@@ -167,6 +171,7 @@ fn layout_rotate_swaps_bounds_preserves_center_and_uses_oriented_resize()
             y: 400.0,
             scale: 1.0,
             rotation: Rotation::Deg0,
+            flipped: false,
         },
     );
 
@@ -200,6 +205,7 @@ fn layout_rotate_clamps_wide_overlay_against_screen_height()
             y: 100.0,
             scale: 1.0,
             rotation: Rotation::Deg0,
+            flipped: false,
         },
     );
 
@@ -224,10 +230,12 @@ fn layout_restores_saved_rotation_on_startup_and_clamps_bounds()
             y: 200.0,
             scale: 1.0,
             rotation: Rotation::Deg270,
+            flipped: false,
         },
     );
 
     assert_eq!(layout.rotation(), Rotation::Deg270);
+    assert!(!layout.flipped());
     assert_eq!(layout.state().rotation, Rotation::Deg270);
     assert_eq!(layout.oriented_frame_size(), (600, 1800));
     let expected_scale = 1080.0 / 1800.0;
@@ -236,4 +244,96 @@ fn layout_restores_saved_rotation_on_startup_and_clamps_bounds()
     assert!(w <= 1920 && h <= 1080);
     assert_eq!(layout.state().x, f64::from(1920 - w));
     assert_eq!(layout.state().y, 0.0);
+}
+
+#[test]
+fn layout_flip_and_rotate_match_screen_space_dihedral_group()
+{
+    fn rot_cw(g: [[char; 2]; 2]) -> [[char; 2]; 2]
+    {
+        [[g[1][0], g[0][0]], [g[1][1], g[0][1]]]
+    }
+    fn rot_ccw(g: [[char; 2]; 2]) -> [[char; 2]; 2]
+    {
+        [[g[0][1], g[1][1]], [g[0][0], g[1][0]]]
+    }
+    fn flip_h(g: [[char; 2]; 2]) -> [[char; 2]; 2]
+    {
+        [[g[0][1], g[0][0]], [g[1][1], g[1][0]]]
+    }
+    fn flip_v(g: [[char; 2]; 2]) -> [[char; 2]; 2]
+    {
+        [g[1], g[0]]
+    }
+    fn render(rotation: Rotation, flipped: bool) -> [[char; 2]; 2]
+    {
+        let mut grid = [['A', 'B'], ['C', 'D']];
+        let steps = match rotation
+        {
+            Rotation::Deg0 => 0,
+            Rotation::Deg90 => 1,
+            Rotation::Deg180 => 2,
+            Rotation::Deg270 => 3,
+        };
+        for _ in 0..steps
+        {
+            grid = rot_cw(grid);
+        }
+        if flipped
+        {
+            grid = flip_h(grid);
+        }
+        grid
+    }
+
+    enum Op
+    {
+        Rot(RotateDirection),
+        Flip(FlipAxis),
+    }
+
+    let ops = [
+        Op::Flip(FlipAxis::Horizontal),
+        Op::Rot(RotateDirection::Clockwise),
+        Op::Flip(FlipAxis::Vertical),
+        Op::Rot(RotateDirection::CounterClockwise),
+        Op::Rot(RotateDirection::CounterClockwise),
+        Op::Flip(FlipAxis::Horizontal),
+        Op::Flip(FlipAxis::Vertical),
+        Op::Rot(RotateDirection::Clockwise),
+    ];
+
+    let mut layout = OverlayLayout::new(400, 300, 1920, 1080, OverlayState::default());
+    let mut expected = [['A', 'B'], ['C', 'D']];
+
+    for op in ops
+    {
+        match op
+        {
+            Op::Rot(dir) =>
+            {
+                layout.rotate(dir);
+                expected = match dir
+                {
+                    RotateDirection::Clockwise => rot_cw(expected),
+                    RotateDirection::CounterClockwise => rot_ccw(expected),
+                };
+            }
+            Op::Flip(axis) =>
+            {
+                layout.flip(axis);
+                expected = match axis
+                {
+                    FlipAxis::Horizontal => flip_h(expected),
+                    FlipAxis::Vertical => flip_v(expected),
+                };
+            }
+        }
+        assert_eq!(render(layout.rotation(), layout.flipped()), expected);
+    }
+
+    // Flipping keeps size and position untouched while preserving center under later rotation.
+    let rect_before = layout.overlay_rect();
+    layout.flip(FlipAxis::Horizontal);
+    assert_eq!(layout.overlay_rect(), rect_before);
 }

@@ -36,8 +36,8 @@ pub use app::{prepare_signals, run_overlay};
 pub use input::{HANDLE_FADE_MS, InputEffects, InputState, PointerCursor, SAVE_DEBOUNCE_MS};
 // Monitor resolution exports for runtime selection and isolated tests.
 pub use monitor::{MonitorDescriptor, resolve_monitor_index};
-// Parent layer/image surface rotation mapper exported for integration tests.
-pub use scene::wl_transform_for_rotation;
+// Parent layer/image surface orientation mapper exported for integration tests.
+pub use scene::wl_transform_for_orientation;
 // Triple-click and edit-mode keyboard shortcut exports for integration tests.
 pub use shortcuts::{
     ClickTracker, KeyShortcut, TRIPLE_CLICK_DISTANCE_PX, TRIPLE_CLICK_WINDOW_MS, map_edit_keysym,

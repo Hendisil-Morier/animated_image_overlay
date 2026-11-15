@@ -160,6 +160,8 @@ fn cli_handles_help_flag_as_early_exit()
         "+ / -",
         "r / R",
         "Rotate 90 degrees",
+        "f / F",
+        "Flip horizontally",
         "Space",
         "q",
     ]

@@ -56,6 +56,10 @@ pub struct OverlayState
         deserialize_with = "deserialize_rotation"
     )]
     pub rotation: Rotation,
+
+    /// Whether the rotated visual overlay is mirrored horizontally across its center axis.
+    #[serde(default)]
+    pub flipped: bool,
 }
 
 impl Default for OverlayState
@@ -68,6 +72,7 @@ impl Default for OverlayState
             y: DEFAULT_POS_Y,
             scale: DEFAULT_SCALE,
             rotation: Rotation::default(),
+            flipped: false,
         }
     }
 }
@@ -167,6 +172,11 @@ impl ConfigStore
             state.rotation = rotation;
         }
 
+        if let Some(flipped) = entry.get("flipped").and_then(Value::as_bool)
+        {
+            state.flipped = flipped;
+        }
+
         state
     }
 
@@ -228,6 +238,7 @@ impl ConfigStore
             y = state.y,
             scale = state.scale,
             rotation = state.rotation.degrees(),
+            flipped = state.flipped,
             "Saved overlay state"
         );
         Ok(())

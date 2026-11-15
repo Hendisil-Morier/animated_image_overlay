@@ -420,6 +420,12 @@ impl InputState
                 effects.layout_changed = true;
                 effects.schedule_save = true;
             }
+            KeyShortcut::Flip(axis) =>
+            {
+                layout.flip(axis);
+                effects.layout_changed = true;
+                effects.schedule_save = true;
+            }
             KeyShortcut::TogglePause =>
             {
                 effects.toggle_pause = true;

@@ -3,8 +3,8 @@
 // Wayland keyboard symbol constants and scroll axis metrics from SCTK.
 use smithay_client_toolkit::seat::{keyboard::Keysym, pointer::AxisScroll};
 
-// Quarter-turn rotation direction mapped from edit-mode `r` / `R` keys.
-use crate::layout::RotateDirection;
+// Axis and rotation direction mapped from edit-mode `r`/`R` and `f`/`F` shortcuts.
+use crate::layout::{FlipAxis, RotateDirection};
 
 /// Maximum inter-click interval in milliseconds for consecutive triple-click taps.
 pub const TRIPLE_CLICK_WINDOW_MS: u32 = 400;
@@ -41,6 +41,9 @@ pub enum KeyShortcut
 
     /// Rotate overlay 90 degrees clockwise (`r`) or counter-clockwise (`R`).
     Rotate(RotateDirection),
+
+    /// Mirror overlay horizontally (`f`) or vertically (`F`).
+    Flip(FlipAxis),
 
     /// Toggle animation playback pause/resume (`Space`).
     TogglePause,
@@ -137,6 +140,8 @@ pub fn map_edit_keysym(keysym: Keysym) -> Option<KeyShortcut>
         }
         Keysym::r => Some(KeyShortcut::Rotate(RotateDirection::Clockwise)),
         Keysym::R => Some(KeyShortcut::Rotate(RotateDirection::CounterClockwise)),
+        Keysym::f => Some(KeyShortcut::Flip(FlipAxis::Horizontal)),
+        Keysym::F => Some(KeyShortcut::Flip(FlipAxis::Vertical)),
         Keysym::space => Some(KeyShortcut::TogglePause),
         _ => None,
     }

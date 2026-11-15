@@ -3,12 +3,12 @@
 
 use animated_image_widget::{
     config::OverlayState,
-    layout::{KEYBOARD_NUDGE_PX, OverlayLayout, RotateDirection, Rotation},
+    layout::{FlipAxis, KEYBOARD_NUDGE_PX, OverlayLayout, RotateDirection, Rotation},
     wayland::{
         ClickTracker, InputState, KeyShortcut, MonitorDescriptor, PointerCursor,
         TRIPLE_CLICK_WINDOW_MS,
         chrome::{ChromeGeometry, needs_chrome_rebuild},
-        map_edit_keysym, resolve_monitor_index, wl_transform_for_rotation,
+        map_edit_keysym, resolve_monitor_index, wl_transform_for_orientation,
     },
 };
 use smithay_client_toolkit::seat::{
@@ -29,6 +29,7 @@ fn sample_layout() -> OverlayLayout
             y: 150.0,
             scale: 1.0,
             rotation: Rotation::Deg0,
+            flipped: false,
         },
     )
 }
@@ -233,6 +234,14 @@ fn keyboard_shortcuts_operate_only_in_edit_mode()
         map_edit_keysym(Keysym::R),
         Some(KeyShortcut::Rotate(RotateDirection::CounterClockwise))
     );
+    assert_eq!(
+        map_edit_keysym(Keysym::f),
+        Some(KeyShortcut::Flip(FlipAxis::Horizontal))
+    );
+    assert_eq!(
+        map_edit_keysym(Keysym::F),
+        Some(KeyShortcut::Flip(FlipAxis::Vertical))
+    );
     assert_eq!(map_edit_keysym(Keysym::q), Some(KeyShortcut::Quit));
 }
 
@@ -263,6 +272,36 @@ fn rotate_shortcuts_work_only_in_edit_mode_and_ignore_repeats()
     assert!(ccw.layout_changed);
     assert!(ccw.schedule_save);
     assert_eq!(layout.rotation(), Rotation::Deg0);
+    assert_eq!(layout.overlay_size(), (400, 300));
+}
+
+#[test]
+fn flip_shortcuts_work_only_in_edit_mode_and_ignore_repeats()
+{
+    let mut layout = sample_layout();
+    let mut input = InputState::default();
+
+    let passive = input.on_key_press(Keysym::f, &mut layout);
+    assert!(!passive.layout_changed);
+    assert!(!layout.flipped());
+
+    input.editing = true;
+
+    let horiz = input.on_key_press(Keysym::f, &mut layout);
+    assert!(horiz.layout_changed);
+    assert!(horiz.schedule_save);
+    assert!(layout.flipped());
+    assert_eq!(layout.rotation(), Rotation::Deg0);
+
+    // Held f/F repeat events are ignored so mirroring does not oscillate rapidly.
+    assert!(!input.on_key_repeat(Keysym::f, &mut layout).layout_changed);
+    assert!(layout.flipped());
+
+    let vert = input.on_key_press(Keysym::F, &mut layout);
+    assert!(vert.layout_changed);
+    assert!(vert.schedule_save);
+    assert!(!layout.flipped());
+    assert_eq!(layout.rotation(), Rotation::Deg180);
     assert_eq!(layout.overlay_size(), (400, 300));
 }
 
@@ -460,10 +499,38 @@ fn chrome_geometry_and_rebuild_policy_scale_hidpi_and_monitor_growth()
 }
 
 #[test]
-fn rotation_maps_to_expected_wayland_buffer_transforms()
+fn orientation_maps_to_expected_wayland_buffer_transforms()
 {
-    assert_eq!(wl_transform_for_rotation(Rotation::Deg0), Transform::Normal);
-    assert_eq!(wl_transform_for_rotation(Rotation::Deg90), Transform::_90);
-    assert_eq!(wl_transform_for_rotation(Rotation::Deg180), Transform::_180);
-    assert_eq!(wl_transform_for_rotation(Rotation::Deg270), Transform::_270);
+    assert_eq!(
+        wl_transform_for_orientation(Rotation::Deg0, false),
+        Transform::Normal
+    );
+    assert_eq!(
+        wl_transform_for_orientation(Rotation::Deg90, false),
+        Transform::_90
+    );
+    assert_eq!(
+        wl_transform_for_orientation(Rotation::Deg180, false),
+        Transform::_180
+    );
+    assert_eq!(
+        wl_transform_for_orientation(Rotation::Deg270, false),
+        Transform::_270
+    );
+    assert_eq!(
+        wl_transform_for_orientation(Rotation::Deg0, true),
+        Transform::Flipped
+    );
+    assert_eq!(
+        wl_transform_for_orientation(Rotation::Deg90, true),
+        Transform::Flipped90
+    );
+    assert_eq!(
+        wl_transform_for_orientation(Rotation::Deg180, true),
+        Transform::Flipped180
+    );
+    assert_eq!(
+        wl_transform_for_orientation(Rotation::Deg270, true),
+        Transform::Flipped270
+    );
 }
