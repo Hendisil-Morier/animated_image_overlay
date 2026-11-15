@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Added
+- Added `-r` / `--ram-cache-mb` CLI flag (`FrameCache::open_with_ram_budget`) to set the RAM ceiling in MiB for keeping decoded frames in memory or pass `0` to read every animation from disk (default: `128`).
+- Added `-d` / `--debug` CLI flag (`logging::init_logging_with_debug`) to print debug diagnostics to stdout alongside rolling daily log files, matching `OVERLAY_DEBUG=1`.
+
 ## [0.2.1] - 2026-11-15
 
 ### Changed
