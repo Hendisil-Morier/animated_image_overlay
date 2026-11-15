@@ -1,12 +1,13 @@
-from contextlib import redirect_stderr
-import io
-import os
-import sys
-import tempfile
-import time
-import unittest
-from unittest.mock import MagicMock
-import zlib
+from concurrent.futures import ThreadPoolExecutor  # Concurrent worker threads for lock testing
+from contextlib import redirect_stderr           # Stderr capture for argparse error checks
+import io                                        # In-memory text stream for redirected stderr
+import os                                        # Filesystem path and directory inspection
+import sys                                       # Module path setup for root imports
+import tempfile                                  # Isolated per-test temporary directories
+import time                                      # Clock/age manipulation and artificial delays
+import unittest                                  # Unit test framework and assertions
+from unittest.mock import MagicMock              # Lightweight GTK/GDK object stubs
+import zlib                                      # Compressed RGBA frame construction for cache tests
 
 from PIL import Image
 
@@ -240,6 +241,87 @@ class TestOverlay(unittest.TestCase):
         for i in range(len(long_store.compressed_frames)):
             long_store.get_texture(i)
         self.assertEqual(len(long_store.texture_cache), 2)
+
+    def test_atomic_write_bytes_cleans_temp_on_error(self):
+        """Verify failed atomic_write_bytes removes temp files without creating target."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "broken.zraw")
+            with self.assertRaises(TypeError):
+                config.atomic_write_bytes(target, object())
+            self.assertFalse(os.path.exists(target))
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_save_state_entry_serializes_concurrent_writes(self):
+        """Verify concurrent save_state_entry calls preserve every key via flock."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = os.path.join(tmp, "nested", "apng-overlay.json")
+            orig_cfg = config.CONFIG_PATH
+            orig_atomic_json = config.atomic_write_json
+            config.CONFIG_PATH = cfg
+
+            def slow_atomic_write_json(path, data):
+                time.sleep(0.01)
+                orig_atomic_json(path, data)
+
+            config.atomic_write_json = slow_atomic_write_json
+            try:
+                keys = [f"/img_{i}.png" for i in range(6)]
+
+                def write_key(idx):
+                    config.save_state_entry(
+                        keys[idx],
+                        {"x": idx * 10, "y": idx * 20, "scale": 1.0},
+                    )
+
+                with ThreadPoolExecutor(max_workers=6) as pool:
+                    list(pool.map(write_key, range(6)))
+
+                for idx, key in enumerate(keys):
+                    self.assertEqual(
+                        config.load_saved_state(key),
+                        {"x": idx * 10, "y": idx * 20, "scale": 1.0},
+                    )
+            finally:
+                config.atomic_write_json = orig_atomic_json
+                config.CONFIG_PATH = orig_cfg
+
+    def test_single_frame_cache_commits_raw_before_meta(self):
+        """Verify single-frame caching commits .zraw before .json and leaves no temps on failure."""
+        with tempfile.TemporaryDirectory() as tmp:
+            img_path = os.path.join(tmp, "single.png")
+            Image.new("RGBA", (64, 48), (12, 34, 56, 255)).save(img_path)
+
+            orig_cache = cache.CACHE_DIR
+            orig_write_meta = cache._write_cache_meta
+            cache_dir = os.path.join(tmp, "cache")
+            cache.CACHE_DIR = cache_dir
+            events = []
+
+            def failing_meta(*_args, **_kwargs):
+                events.append(("meta_attempt", os.path.exists(raw_path)))
+                raise OSError("simulated metadata failure")
+
+            try:
+                raw_path, meta_path = cache.cache_paths(img_path, 500, 0)
+                cache._write_cache_meta = failing_meta
+                with self.assertRaises(OSError):
+                    cache.FrameStore(img_path, 500, 0).prepare_first_frame()
+
+                self.assertEqual(events, [("meta_attempt", True)])
+                self.assertFalse(os.path.exists(meta_path))
+                self.assertEqual(
+                    [n for n in os.listdir(cache_dir) if n.startswith(".tmp-")],
+                    [],
+                )
+
+                cache._write_cache_meta = orig_write_meta
+                store = cache.FrameStore(img_path, 500, 0)
+                store.prepare_first_frame()
+                self.assertTrue(os.path.exists(raw_path))
+                self.assertTrue(os.path.exists(meta_path))
+            finally:
+                cache._write_cache_meta = orig_write_meta
+                cache.CACHE_DIR = orig_cache
 
 
 if __name__ == "__main__":

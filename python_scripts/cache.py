@@ -16,10 +16,26 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib
 
-from config import atomic_write_json, log
+from config import atomic_write_bytes, atomic_write_json, log
 
+# Directory storing compressed frame payloads (.zraw) and metadata (.json).
 CACHE_DIR = os.path.expanduser("~/.cache/apng-overlay")
+
+# Maximum cached Gdk.MemoryTexture entries for short animations before capping at 2.
 TEXTURE_CACHE_LIMIT = 32
+
+
+def _write_cache_meta(meta_path, width, height, delays, sizes):
+    """Atomically write frame dimensions, per-frame delays, and chunk byte sizes."""
+    atomic_write_json(
+        meta_path,
+        {
+            "w": width,
+            "h": height,
+            "delays": delays,
+            "sizes": sizes,
+        },
+    )
 
 
 def make_texture(width, height, data):
@@ -121,12 +137,15 @@ class FrameStore:
 
         if limit <= 1:
             im.close()
-            atomic_write_json(
+            atomic_write_bytes(raw_path, first_compressed)
+            # Written last so an interrupted run never leaves a usable cache.
+            _write_cache_meta(
                 meta_path,
-                {"w": target_w, "h": target_h, "delays": [first_delay], "sizes": [len(first_compressed)]},
+                target_w,
+                target_h,
+                [first_delay],
+                [len(first_compressed)],
             )
-            with open(raw_path, "wb") as out:
-                out.write(first_compressed)
             self.decode_done = True
             prune_cache(cache_dir)
             return
@@ -306,9 +325,12 @@ class FrameStore:
 
             os.replace(tmp_raw, raw_path)
             # Written last so an interrupted run never leaves a usable cache.
-            atomic_write_json(
+            _write_cache_meta(
                 meta_path,
-                {"w": target_w, "h": target_h, "delays": all_delays, "sizes": all_sizes},
+                target_w,
+                target_h,
+                all_delays,
+                all_sizes,
             )
             GLib.idle_add(self._on_batch_ready, batch, True, "decoding done")
         except Exception:
