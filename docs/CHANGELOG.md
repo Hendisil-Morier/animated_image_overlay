@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [0.2.1] - 2026-11-15
+
+### Changed
+- Streamed `.lraw` cache chunks lazily from disk via positional reads (`LrawReader` and `ChunkSpan`) and a single reusable `FrameScratch` decompression buffer, removing permanent `compressed_frames` heap retention and background cache reader threads on warm opens.
+- Skipped populating the 128 MiB uncompressed RAM LRU cache (`ram_slots`) when an animation's decoded footprint exceeds the configured budget, preserving LRU caching for smaller loops while passing borrowed frame pixels directly to Wayland SHM staging via `FrameCache::with_frame_argb`.
+
+### Benchmark Comparison (`~/Pictures/M_Animation.apng`, `500x723`, 180 frames)
+- **Warm Steady-State Memory:** `16,636 kB` `VmRSS` (`-90.8%` vs `v0.2.0` `181,180 kB`), `12,435 kB` `Pss` (`-93.0%` vs `176,745 kB`), and `7,036 kB` `RssAnon` (`-95.9%` vs `171,604 kB`) at `3.50%` 2s CPU load.
+
 ## [0.2.0] - 2026-11-15
 
 ### Added
