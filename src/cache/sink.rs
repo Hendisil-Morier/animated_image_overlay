@@ -55,8 +55,8 @@ pub(crate) struct DecodeCacheSink
     // Frame pixel height for metadata serialization.
     height: u32,
 
-    // Accumulated per-frame delays for `.json` commit.
-    all_delays: Vec<u32>,
+    // Accumulated per-frame microsecond delays for `.json` commit.
+    all_delays_us: Vec<u32>,
 
     // Accumulated per-frame `.lraw` chunk byte sizes for `.json` commit.
     all_sizes: Vec<usize>,
@@ -92,7 +92,7 @@ impl DecodeCacheSink
             temp_lraw: None,
             width: 0,
             height: 0,
-            all_delays: Vec::new(),
+            all_delays_us: Vec::new(),
             all_sizes: Vec::new(),
             pending_batch: Vec::with_capacity(DECODE_BATCH_SIZE),
             wakeup,
@@ -115,14 +115,14 @@ impl FrameStreamSink for DecodeCacheSink
             frame_bytes,
             self.ram_budget_bytes,
             frame.lz4_payload.clone(),
-            frame.delay_ms,
+            frame.delay_us,
             frame.argb8888.clone(),
             false,
         );
         self.shared = Some(Arc::clone(&shared));
         *lock_mutex(&self.shared_handoff) = Some(shared);
 
-        self.all_delays.push(frame.delay_ms);
+        self.all_delays_us.push(frame.delay_us);
         self.all_sizes.push(frame.lz4_payload.len());
 
         let mut temp =
@@ -156,9 +156,9 @@ impl FrameStreamSink for DecodeCacheSink
                 })?;
         }
 
-        self.all_delays.push(frame.delay_ms);
+        self.all_delays_us.push(frame.delay_us);
         self.all_sizes.push(frame.lz4_payload.len());
-        self.pending_batch.push((frame.lz4_payload, frame.delay_ms));
+        self.pending_batch.push((frame.lz4_payload, frame.delay_us));
 
         if self.pending_batch.len() >= DECODE_BATCH_SIZE
             && let Some(shared) = &self.shared
@@ -186,7 +186,7 @@ impl FrameStreamSink for DecodeCacheSink
                 &self.paths.meta_path,
                 self.width,
                 self.height,
-                &self.all_delays,
+                &self.all_delays_us,
                 &self.all_sizes,
             )
             {

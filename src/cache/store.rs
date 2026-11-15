@@ -142,7 +142,7 @@ impl FrameCache
                     byte_len,
                     ram_budget_bytes,
                     first.lz4_payload,
-                    first.delay_ms,
+                    first.delay_us,
                     first.argb8888,
                     worker.is_none(),
                 )
@@ -194,17 +194,17 @@ impl FrameCache
         (guard.width, guard.height)
     }
 
-    /// Invokes `visit` with borrowed frame delays and decode completion status without cloning.
-    pub fn with_delays<R>(&self, visit: impl FnOnce(&[u32], bool) -> R) -> R
+    /// Invokes `visit` with borrowed frame microsecond delays and decode completion status without cloning.
+    pub fn with_delays_us<R>(&self, visit: impl FnOnce(&[u32], bool) -> R) -> R
     {
         let guard = lock_mutex(&self.shared);
-        visit(&guard.delays_ms, guard.decode_done)
+        visit(&guard.delays_us, guard.decode_done)
     }
 
     /// Returns total number of frames currently known for playback.
     pub fn frame_count(&self) -> usize
     {
-        lock_mutex(&self.shared).delays_ms.len()
+        lock_mutex(&self.shared).delays_us.len()
     }
 
     /// Returns `true` when background streaming or decoding has completed.
@@ -218,7 +218,7 @@ impl FrameCache
     {
         let guard = lock_mutex(&self.shared);
         (
-            guard.delays_ms.len(),
+            guard.delays_us.len(),
             guard.decode_done,
             guard.fits_ram_budget(),
         )

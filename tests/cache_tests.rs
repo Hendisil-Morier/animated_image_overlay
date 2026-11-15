@@ -95,6 +95,8 @@ fn cache_commits_lraw_and_json_and_serves_warm_hits()
     let paths = compute_cache_paths(&cache_dir, &img_path, 500, 0).unwrap();
     assert!(paths.lraw_path.is_file());
     assert!(paths.meta_path.is_file());
+    let meta_json = fs::read_to_string(&paths.meta_path).expect("metadata json readable");
+    assert!(meta_json.contains("\"delays_us\""));
 
     // Delete source file to prove second open serves 100% from warm disk cache!
     // Keep same path only if metadata checks stat? Wait: compute_cache_paths stats `img_path`,
@@ -354,12 +356,20 @@ fn cache_with_delays_borrows_timing_slice_without_blocking_subsequent_frame_read
         std::thread::sleep(Duration::from_millis(5));
     }
 
-    let (count, done) = store.with_delays(|delays, decode_done| (delays.len(), decode_done));
-    assert_eq!(count, 3);
+    let (delays_us, done) =
+        store.with_delays_us(|delays_us, decode_done| (delays_us.to_vec(), decode_done));
+    assert_eq!(delays_us.len(), 3);
     assert!(done);
     assert_eq!(
         store.frame_argb(0).expect("frame 0 accessible").len(),
         12 * 12 * 4
     );
     store.stop();
+
+    // Warm reopen reads persisted `delays_us` back from `<digest>.json`.
+    let mut warm = FrameCache::open_in_dir(&img_path, 500, 0, &cache_dir, 4096, 30, None)
+        .expect("warm cache should open");
+    let warm_delays = warm.with_delays_us(|d, _| d.to_vec());
+    assert_eq!(warm_delays, delays_us);
+    warm.stop();
 }

@@ -11,10 +11,11 @@ use fast_image_resize::{
 // Fast LZ4 compression prepending uncompressed payload byte length.
 use lz4_flex::compress_prepend_size;
 
-// Cache subsystem error conversions and angle bounding-box geometry.
+// Cache subsystem error conversions, angle bounding-box geometry, and microsecond delay rounding.
 use crate::{
     error::CacheError,
     layout::{normalized_angle_deg, rotated_bounds},
+    playback::PlaybackClock,
 };
 
 /// Pixel format multiplier (bytes per pixel for Wayland `ARGB8888` / `RGBA8888`).
@@ -30,8 +31,11 @@ pub struct DecodedFirstFrame
     /// Stored frame height in pixels proportional to stored width.
     pub height: u32,
 
-    /// Display delay in milliseconds (clamped to `>= 10 ms`).
+    /// Display delay in milliseconds rounded from `delay_us` (clamped to `>= 10 ms`).
     pub delay_ms: u32,
+
+    /// Display delay in microseconds (clamped to `>= 10_000 us`).
+    pub delay_us: u32,
 
     /// Uncompressed premultiplied Wayland `ARGB8888` pixel buffer.
     pub argb8888: Vec<u8>,
@@ -44,8 +48,11 @@ pub struct DecodedFirstFrame
 #[derive(Debug, Clone)]
 pub struct EncodedFrame
 {
-    /// Display delay in milliseconds (clamped to `>= 10 ms`).
+    /// Display delay in milliseconds rounded from `delay_us` (clamped to `>= 10 ms`).
     pub delay_ms: u32,
+
+    /// Display delay in microseconds (clamped to `>= 10_000 us`).
+    pub delay_us: u32,
 
     /// LZ4-compressed premultiplied `ARGB8888` pixel chunk.
     pub lz4_payload: Vec<u8>,
@@ -60,8 +67,8 @@ pub(crate) struct RawRgbaFrame
     /// Source pixel height prior to aspect-preserving downscale.
     pub(crate) height: u32,
 
-    /// Normalized millisecond display duration (`>= 10 ms`).
-    pub(crate) delay_ms: u32,
+    /// Normalized microsecond display duration (`>= 10_000 us`).
+    pub(crate) delay_us: u32,
 
     /// Interleaved straight `[R, G, B, A]` pixels.
     pub(crate) rgba: Vec<u8>,
@@ -133,7 +140,8 @@ pub(crate) fn encode_first_frame(
     Ok(DecodedFirstFrame {
         width: target_w,
         height: target_h,
-        delay_ms: raw.delay_ms,
+        delay_ms: PlaybackClock::delay_us_to_ms(raw.delay_us),
+        delay_us: raw.delay_us,
         argb8888,
         lz4_payload,
     })
@@ -149,6 +157,7 @@ pub(crate) fn encode_subsequent_frame(
     let frame = encode_first_frame(raw, base_width, resizer)?;
     Ok(EncodedFrame {
         delay_ms: frame.delay_ms,
+        delay_us: frame.delay_us,
         lz4_payload: frame.lz4_payload,
     })
 }

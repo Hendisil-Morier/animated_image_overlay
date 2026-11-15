@@ -65,6 +65,7 @@ struct RecordedStream
 {
     frames: Vec<Vec<u8>>,
     delays: Vec<u32>,
+    delays_us: Vec<u32>,
     finished: bool,
     cancelled: bool,
     finish_err: Option<String>,
@@ -82,6 +83,7 @@ impl FrameStreamSink for RecordingSink
         let mut guard = self.state.lock().unwrap();
         guard.frames.push(frame.lz4_payload.clone());
         guard.delays.push(frame.delay_ms);
+        guard.delays_us.push(frame.delay_us);
         Ok(())
     }
 
@@ -90,6 +92,7 @@ impl FrameStreamSink for RecordingSink
         let mut guard = self.state.lock().unwrap();
         guard.frames.push(frame.lz4_payload);
         guard.delays.push(frame.delay_ms);
+        guard.delays_us.push(frame.delay_us);
         Ok(())
     }
 
@@ -103,6 +106,15 @@ impl FrameStreamSink for RecordingSink
 }
 
 fn build_synthetic_apng_2x2(frames_rgba: &[([u8; 4], u16)]) -> Vec<u8>
+{
+    let fractional: Vec<([u8; 4], u16, u16)> = frames_rgba
+        .iter()
+        .map(|&(rgba, delay_ms)| (rgba, delay_ms, 1000))
+        .collect();
+    build_synthetic_apng_2x2_fraction(&fractional)
+}
+
+fn build_synthetic_apng_2x2_fraction(frames_rgba: &[([u8; 4], u16, u16)]) -> Vec<u8>
 {
     fn crc32(bytes: &[u8]) -> u32
     {
@@ -182,7 +194,7 @@ fn build_synthetic_apng_2x2(frames_rgba: &[([u8; 4], u16)]) -> Vec<u8>
     push_chunk(&mut out, b"acTL", &actl);
 
     let mut seq = 0_u32;
-    for (idx, &(rgba, delay_ms)) in frames_rgba.iter().enumerate()
+    for (idx, &(rgba, delay_num, delay_den)) in frames_rgba.iter().enumerate()
     {
         let mut fctl = Vec::with_capacity(26);
         fctl.extend_from_slice(&seq.to_be_bytes());
@@ -191,8 +203,8 @@ fn build_synthetic_apng_2x2(frames_rgba: &[([u8; 4], u16)]) -> Vec<u8>
         fctl.extend_from_slice(&2_u32.to_be_bytes()); // height
         fctl.extend_from_slice(&0_u32.to_be_bytes()); // x_offset
         fctl.extend_from_slice(&0_u32.to_be_bytes()); // y_offset
-        fctl.extend_from_slice(&delay_ms.to_be_bytes()); // delay_num
-        fctl.extend_from_slice(&1000_u16.to_be_bytes()); // delay_den (ms)
+        fctl.extend_from_slice(&delay_num.to_be_bytes()); // delay_num
+        fctl.extend_from_slice(&delay_den.to_be_bytes()); // delay_den
         fctl.push(0); // dispose_op = none
         fctl.push(0); // blend_op = source
         push_chunk(&mut out, b"fcTL", &fctl);
@@ -715,4 +727,40 @@ fn resize_premultiplied_argb8888_downscales_and_preserves_identity()
 
     // Mismatched source byte counts return an error rather than resizing invalid memory.
     assert!(resize_premultiplied_argb8888(&solid[..16], 20, 10, 10, 5, &mut resizer).is_err());
+}
+
+#[test]
+fn decode_preserves_60fps_apng_microsecond_delays()
+{
+    let temp = TempDecodeDir::new("apng_60fps");
+    let apng_path = temp.path().join("sixty_fps.apng");
+    let apng_bytes = build_synthetic_apng_2x2_fraction(&[
+        ([255, 0, 0, 255], 1, 60),
+        ([0, 255, 0, 255], 1, 60),
+        ([0, 0, 255, 255], 1, 60),
+    ]);
+    fs::write(&apng_path, apng_bytes).unwrap();
+
+    let rec_state = Arc::new(Mutex::new(RecordedStream::default()));
+    let (first, worker) = FrameDecoder::open_stream(
+        &apng_path,
+        500,
+        0,
+        Arc::new(AtomicBool::new(false)),
+        Box::new(RecordingSink {
+            state: Arc::clone(&rec_state),
+        }),
+    )
+    .expect("60fps APNG should stream");
+    if let Some(handle) = worker
+    {
+        handle.join().unwrap();
+    }
+
+    assert_eq!(first.delay_us, 16_667);
+    assert_eq!(first.delay_ms, 17);
+    let rec = rec_state.lock().unwrap();
+    assert!(rec.finished);
+    assert!(rec.finish_err.is_none());
+    assert_eq!(rec.delays_us, vec![16_667, 16_667, 16_667]);
 }

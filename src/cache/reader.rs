@@ -17,7 +17,7 @@ use super::{
     memory::{ChunkSpan, SharedFrames},
     store::FrameCache,
 };
-use crate::{decode::checked_argb_byte_len, error::CacheError, playback::MIN_FRAME_DELAY_MS};
+use crate::{decode::checked_argb_byte_len, error::CacheError, playback::MIN_FRAME_DELAY_US};
 
 /// Random-access `.lraw` chunk reader reusing a single compressed byte buffer across frames.
 pub(crate) struct LrawReader
@@ -209,10 +209,10 @@ pub(crate) fn try_open_cached_store(
     touch_modified(&paths.meta_path);
     touch_modified(&paths.lraw_path);
 
-    let delays_ms: Vec<u32> = meta
-        .delays
+    let delays_us: Vec<u32> = meta
+        .delays_us
         .iter()
-        .map(|&delay| delay.max(MIN_FRAME_DELAY_MS))
+        .map(|&delay| delay.max(MIN_FRAME_DELAY_US))
         .collect();
     let shared = SharedFrames::with_warm_disk(
         meta.w,
@@ -220,7 +220,7 @@ pub(crate) fn try_open_cached_store(
         frame_byte_len,
         ram_budget_bytes,
         spans,
-        delays_ms,
+        delays_us,
         first_raw,
     );
     let scratch = Arc::new(Mutex::new(FrameScratch::with_reader(reader)));
@@ -232,7 +232,7 @@ pub(crate) fn try_open_cached_store(
         .to_path_buf();
 
     tracing::debug!(
-        frames = meta.delays.len(),
+        frames = meta.delays_us.len(),
         w = meta.w,
         h = meta.h,
         "Opened warm lazy .lraw cache"

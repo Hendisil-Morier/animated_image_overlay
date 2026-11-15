@@ -41,8 +41,8 @@ pub(crate) struct SharedFrames
     /// Byte spans into the committed `.lraw` file for lazy chunk streaming.
     pub(crate) disk_spans: Vec<ChunkSpan>,
 
-    /// Normalized millisecond delays parallel to `compressed_frames` or `disk_spans`.
-    pub(crate) delays_ms: Vec<u32>,
+    /// Normalized microsecond delays parallel to `compressed_frames` or `disk_spans`.
+    pub(crate) delays_us: Vec<u32>,
 
     /// Set once source decoding or disk cache validation finishes.
     pub(crate) decode_done: bool,
@@ -73,7 +73,7 @@ impl SharedFrames
         frame_byte_len: usize,
         ram_budget_bytes: usize,
         first_compressed: Vec<u8>,
-        first_delay_ms: u32,
+        first_delay_us: u32,
         first_argb: Vec<u8>,
         decode_done: bool,
     ) -> Arc<Mutex<Self>>
@@ -84,7 +84,7 @@ impl SharedFrames
             frame_byte_len,
             compressed_frames: vec![first_compressed],
             disk_spans: Vec::new(),
-            delays_ms: vec![first_delay_ms],
+            delays_us: vec![first_delay_us],
             decode_done,
             initial_frame0: None,
             ram_slots: HashMap::new(),
@@ -103,7 +103,7 @@ impl SharedFrames
         frame_byte_len: usize,
         ram_budget_bytes: usize,
         disk_spans: Vec<ChunkSpan>,
-        delays_ms: Vec<u32>,
+        delays_us: Vec<u32>,
         first_argb: Vec<u8>,
     ) -> Arc<Mutex<Self>>
     {
@@ -113,7 +113,7 @@ impl SharedFrames
             frame_byte_len,
             compressed_frames: Vec::new(),
             disk_spans,
-            delays_ms,
+            delays_us,
             decode_done: true,
             initial_frame0: None,
             ram_slots: HashMap::new(),
@@ -128,7 +128,7 @@ impl SharedFrames
     /// Returns whether all currently known frames fit decoded inside `ram_budget_bytes`.
     pub(crate) fn fits_ram_budget(&self) -> bool
     {
-        self.delays_ms
+        self.delays_us
             .len()
             .checked_mul(self.frame_byte_len)
             .is_some_and(|total| total <= self.ram_budget_bytes)
@@ -215,8 +215,8 @@ impl SharedFrames
     }
 }
 
-/// Flushes a batch of `(lz4_chunk, delay_ms)` into `SharedFrames`, optionally marking completion.
-/// Appends a batch of compressed chunks and delays to shared state, pruning RAM cache if oversized.
+/// Appends a batch of `(lz4_chunk, delay_us)` into `SharedFrames`, optionally marking completion,
+/// and prunes RAM cache if oversized.
 pub(crate) fn append_batch(
     shared: &Arc<Mutex<SharedFrames>>,
     batch: &mut Vec<(Vec<u8>, u32)>,
@@ -228,10 +228,10 @@ pub(crate) fn append_batch(
     if has_items || done
     {
         let mut guard = lock_mutex(shared);
-        for (chunk, delay) in batch.drain(..)
+        for (chunk, delay_us) in batch.drain(..)
         {
             guard.compressed_frames.push(chunk);
-            guard.delays_ms.push(delay);
+            guard.delays_us.push(delay_us);
         }
         if done
         {
@@ -257,9 +257,9 @@ pub(crate) fn finish_with_disk(
 {
     {
         let mut guard = lock_mutex(shared);
-        for (_chunk, delay) in remaining_batch.drain(..)
+        for (_chunk, delay_us) in remaining_batch.drain(..)
         {
-            guard.delays_ms.push(delay);
+            guard.delays_us.push(delay_us);
         }
         guard.disk_spans = disk_spans;
         guard.compressed_frames = Vec::new();

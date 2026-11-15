@@ -160,18 +160,18 @@ impl OverlayRuntime
             return;
         }
 
-        let now_ms = self.start_instant.elapsed().as_secs_f64() * 1000.0;
-        let (outcome, wait_ms) = self.cache.with_delays(|delays, decode_done| {
-            let outcome = self.playback.advance(now_ms, delays, decode_done);
-            let wait_ms = if matches!(outcome, TickOutcome::NoChange)
+        let now_us = self.start_instant.elapsed().as_secs_f64() * 1_000_000.0;
+        let (outcome, wait_us) = self.cache.with_delays_us(|delays_us, decode_done| {
+            let outcome = self.playback.advance_us(now_us, delays_us, decode_done);
+            let wait_us = if matches!(outcome, TickOutcome::NoChange)
             {
-                self.playback.ms_until_next_frame(now_ms)
+                self.playback.us_until_next_frame(now_us)
             }
             else
             {
                 None
             };
-            (outcome, wait_ms)
+            (outcome, wait_us)
         });
 
         match outcome
@@ -181,9 +181,9 @@ impl OverlayRuntime
             TickOutcome::FrameChanged(idx) => self.present_frame_at(idx),
             TickOutcome::NoChange =>
             {
-                if let Some(delay_ms) = wait_ms
+                if let Some(delay_us) = wait_us
                 {
-                    self.schedule_frame_timer(delay_ms.max(1));
+                    self.schedule_frame_timer(Duration::from_micros(delay_us.max(1)));
                 }
             }
         }
@@ -206,7 +206,7 @@ impl OverlayRuntime
             Err(err) =>
             {
                 tracing::warn!(error = %err, frame_index = idx, "Failed presenting frame");
-                self.schedule_frame_timer(FRAME_ERROR_RETRY_MS);
+                self.schedule_frame_timer(Duration::from_millis(FRAME_ERROR_RETRY_MS));
             }
         }
     }
@@ -335,13 +335,13 @@ impl OverlayRuntime
         }
     }
 
-    /// Arms or replaces the one-shot animation frame timer for `delay_ms` milliseconds.
-    pub(crate) fn schedule_frame_timer(&mut self, delay_ms: u64)
+    /// Arms or replaces the one-shot animation frame timer for `delay`.
+    pub(crate) fn schedule_frame_timer(&mut self, delay: Duration)
     {
         arm_timer(
             &self.loop_handle,
             &mut self.frame_timer_token,
-            delay_ms,
+            delay,
             Self::on_frame_timer,
         );
     }
@@ -358,7 +358,7 @@ impl OverlayRuntime
         arm_timer(
             &self.loop_handle,
             &mut self.fade_timer_token,
-            HANDLE_FADE_MS,
+            Duration::from_millis(HANDLE_FADE_MS),
             Self::on_fade_timer,
         );
     }
@@ -381,7 +381,7 @@ impl OverlayRuntime
         arm_timer(
             &self.loop_handle,
             &mut self.save_timer_token,
-            SAVE_DEBOUNCE_MS,
+            Duration::from_millis(SAVE_DEBOUNCE_MS),
             Self::on_save_timer,
         );
     }
@@ -469,12 +469,12 @@ impl OverlayRuntime
 fn arm_timer(
     loop_handle: &LoopHandle<'static, OverlayRuntime>,
     slot: &mut Option<RegistrationToken>,
-    delay_ms: u64,
+    delay: Duration,
     on_fire: fn(&mut OverlayRuntime),
 )
 {
     clear_timer(loop_handle, slot);
-    let timer = Timer::from_duration(Duration::from_millis(delay_ms));
+    let timer = Timer::from_duration(delay);
     if let Ok(token) = loop_handle.insert_source(timer, move |_, _, state| {
         on_fire(state);
         TimeoutAction::Drop

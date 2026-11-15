@@ -171,11 +171,11 @@ pub(crate) fn with_webp_reader_frames<R>(
         let (width, height) = frame.dimensions();
         let delta = (frame.timestamp() - prev_timestamp).max(0);
         prev_timestamp = frame.timestamp();
-        let delay_ms = PlaybackClock::normalize_delay_ms(Some(f64::from(delta)));
+        let delay_us = PlaybackClock::normalize_delay_us(Some(f64::from(delta) * 1000.0));
         Ok(RawRgbaFrame {
             width,
             height,
-            delay_ms,
+            delay_us,
             rgba: frame.data().to_vec(),
         })
     });
@@ -214,7 +214,7 @@ fn dynamic_image_into_raw(dyn_img: DynamicImage) -> RawRgbaFrame
     RawRgbaFrame {
         width,
         height,
-        delay_ms: PlaybackClock::normalize_delay_ms(None),
+        delay_us: PlaybackClock::normalize_delay_us(None),
         rgba: rgba.into_raw(),
     }
 }
@@ -248,15 +248,15 @@ fn map_image_frame(
 {
     let frame = res.map_err(|err| decode_err(path, err.to_string()))?;
     let (numer, denom) = frame.delay().numer_denom_ms();
-    let delay_opt = (denom != 0).then(|| f64::from(numer) / f64::from(denom));
-    let delay_ms = PlaybackClock::normalize_delay_ms(delay_opt);
+    let delay_opt = (denom != 0).then(|| (f64::from(numer) * 1000.0) / f64::from(denom));
+    let delay_us = PlaybackClock::normalize_delay_us(delay_opt);
 
     let buffer = frame.into_buffer();
     let (width, height) = buffer.dimensions();
     Ok(RawRgbaFrame {
         width,
         height,
-        delay_ms,
+        delay_us,
         rgba: buffer.into_raw(),
     })
 }

@@ -59,8 +59,8 @@ pub struct CacheMetadata
     /// Stored frame height in pixels.
     pub h: u32,
 
-    /// Per-frame display durations in milliseconds (`>= 10 ms`).
-    pub delays: Vec<u32>,
+    /// Per-frame display durations in microseconds (`>= 10_000 us`).
+    pub delays_us: Vec<u32>,
 
     /// Per-frame compressed byte lengths sequential inside `.lraw`.
     pub sizes: Vec<usize>,
@@ -191,7 +191,10 @@ pub(crate) fn load_and_validate_meta(paths: &CachePaths) -> Result<CacheMetadata
             source,
         })?;
 
-    if meta.w == 0 || meta.h == 0 || meta.delays.is_empty() || meta.delays.len() != meta.sizes.len()
+    if meta.w == 0
+        || meta.h == 0
+        || meta.delays_us.is_empty()
+        || meta.delays_us.len() != meta.sizes.len()
     {
         return Err(CacheError::CorruptMetadata {
             path: paths.meta_path.clone(),
@@ -240,14 +243,14 @@ pub(crate) fn write_cache_metadata(
     meta_path: &Path,
     width: u32,
     height: u32,
-    delays: &[u32],
+    delays_us: &[u32],
     sizes: &[usize],
 ) -> Result<(), CacheError>
 {
     let meta = CacheMetadata {
         w: width,
         h: height,
-        delays: delays.to_vec(),
+        delays_us: delays_us.to_vec(),
         sizes: sizes.to_vec(),
     };
 

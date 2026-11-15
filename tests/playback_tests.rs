@@ -1,6 +1,8 @@
 //! Integration tests for animation playback scheduling, hold-on-stream, wrap, and stall recovery.
 
-use animated_image_widget::playback::{MIN_FRAME_DELAY_MS, PlaybackClock, TickOutcome};
+use animated_image_widget::playback::{
+    DEFAULT_FRAME_DELAY_US, MIN_FRAME_DELAY_MS, MIN_FRAME_DELAY_US, PlaybackClock, TickOutcome,
+};
 
 #[test]
 fn playback_stops_callbacks_for_completed_single_frame_images()
@@ -83,4 +85,44 @@ fn playback_reports_remaining_ms_for_timer_wait_and_clears_while_paused()
 
     assert!(clock.toggle_pause());
     assert_eq!(clock.ms_until_next_frame(90.0), None);
+}
+
+#[test]
+fn playback_preserves_60fps_microsecond_deadlines_and_wait_times()
+{
+    assert_eq!(
+        PlaybackClock::normalize_delay_us(Some(0.0)),
+        MIN_FRAME_DELAY_US
+    );
+    assert_eq!(
+        PlaybackClock::normalize_delay_us(None),
+        DEFAULT_FRAME_DELAY_US
+    );
+    assert_eq!(
+        PlaybackClock::normalize_delay_us(Some(50_000.0 / 3.0)),
+        16_667
+    );
+
+    let mut clock = PlaybackClock::new();
+    let delays_us = [16_667, 16_667, 16_667];
+
+    assert_eq!(clock.us_until_next_frame(0.0), None);
+    assert_eq!(
+        clock.advance_us(0.0, &delays_us, true),
+        TickOutcome::NoChange
+    );
+    assert_eq!(clock.next_deadline_us(), Some(16_667.0));
+    assert_eq!(clock.us_until_next_frame(1_000.4), Some(15_667));
+
+    assert_eq!(
+        clock.advance_us(16_667.0, &delays_us, true),
+        TickOutcome::FrameChanged(1)
+    );
+    assert_eq!(clock.next_deadline_us(), Some(33_334.0));
+
+    assert_eq!(
+        clock.advance_us(33_334.0, &delays_us, true),
+        TickOutcome::FrameChanged(2)
+    );
+    assert_eq!(clock.next_deadline_us(), Some(50_001.0));
 }
