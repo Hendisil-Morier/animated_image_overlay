@@ -657,4 +657,29 @@ fn rotate_argb8888_handles_chirality_and_transparent_apron_antialiasing()
         let (b, g, r, a) = (px[0], px[1], px[2], px[3]);
         assert!(b <= a && g <= a && r <= a, "invalid premul pixel {px:?}");
     }
+
+    // Degenerate 1x1 source and mirrored fractional sweep verify interior/apron boundary transitions.
+    let single = [40_u8, 80, 120, 200];
+    let mut dst_1x1 = vec![0_u8; 4 * 4 * 4];
+    rotate_argb8888_into(&single, 1, 1, 33.0, false, 4, 4, &mut dst_1x1).unwrap();
+    for px in dst_1x1.as_chunks::<4>().0
+    {
+        assert!(px[0] <= px[3] && px[1] <= px[3] && px[2] <= px[3]);
+    }
+
+    let mut gradient = vec![0_u8; 16 * 12 * 4];
+    for (idx, px) in gradient.as_chunks_mut::<4>().0.iter_mut().enumerate()
+    {
+        let b = ((idx * 17) % 256) as u8;
+        let g = ((idx * 31) % 256) as u8;
+        let r = ((idx * 53) % 256) as u8;
+        *px = [b, g, r, 255];
+    }
+    let mut dst_grad = vec![0_u8; 24 * 24 * 4];
+    for angle in [37.5, 143.0, 225.0, 310.0]
+    {
+        rotate_argb8888_into(&gradient, 16, 12, angle, true, 24, 24, &mut dst_grad).unwrap();
+        let center_off = (12 * 24 + 12) * 4;
+        assert_eq!(dst_grad[center_off + 3], 255);
+    }
 }
