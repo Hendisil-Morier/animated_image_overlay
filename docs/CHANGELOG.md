@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## [0.2.0] - 2026-11-15
+
+### Added
+- Added `-e` / `--edit` CLI flag to launch directly into interactive edit mode (`InputState::with_editing`).
+- Added an interactive mouse and keyboard shortcut summary footer to `--help`.
+- Added integer HiDPI chrome scaling in `CompositorHandler::scale_factor_changed` via `ChromeGeometry` and `OverlayChrome::ensure_scale_and_bounds` so corner handle and dashed outline buffers render crisply across scaled outputs and growing monitor dimensions.
+
+### Changed
+- Replaced `FrameCache::delays_snapshot` allocations with closure-based `FrameCache::with_delays`, added `PlaybackClock::ms_until_next_frame`, and moved animation waits onto `calloop` timers that stage the next SHM frame ahead of the compositor callback and cancel cleanly on pause or shutdown.
+- Unified cold startup image probing and decoder creation behind `OpenedSource` in `decode::codecs` and `decode::stream` so source files open once across APNG, static PNG, GIF, WebP, and still formats.
+
+### Fixed
+- Updated `config` to honor non-empty `XDG_CONFIG_HOME` overrides before falling back to `$HOME/.config` alongside shared `xdg::base_dir` resolution used by cache paths.
+- Reset hover, active drag, and click tracking via `InputState::on_pointer_detach` when pointer capabilities detach, guarded chorded button presses during active drags, logged `LayerShellHandler::configure` layout sync failures, and scheduled a `100 ms` recovery timer when frame staging errors occur.
+
 ## [0.1.0] - 2026-11-15 (Rust Wayland Rewrite)
 
 ### Added
