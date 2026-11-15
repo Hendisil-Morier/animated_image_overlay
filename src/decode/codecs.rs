@@ -44,17 +44,13 @@ pub(crate) type FrameIterator<'a> = Box<dyn Iterator<Item = Result<RawRgbaFrame,
 /// Determines container format and whether PNG carries an APNG animation sequence.
 pub(crate) fn detect_source_kind(path: &Path) -> Result<SourceKind, CacheError>
 {
-    let reader = ImageReader::open(path)
-        .map_err(|source| io_err(path, source))?
-        .with_guessed_format()
-        .map_err(|source| io_err(path, source))?;
+    let reader = open_guessed_reader(path)?;
 
     match reader.format()
     {
         Some(ImageFormat::Png) =>
         {
-            let file = File::open(path).map_err(|source| io_err(path, source))?;
-            let png = PngDecoder::new(BufReader::new(file))
+            let png = PngDecoder::new(open_buffered_file(path)?)
                 .map_err(|err| decode_err(path, err.to_string()))?;
 
             if png.is_apng().unwrap_or(false)
@@ -84,8 +80,8 @@ pub(crate) fn decode_single_frame_sync(
     {
         SourceKind::Apng => open_apng_iter(path)?.next(),
         SourceKind::Gif => open_gif_iter(path)?.next(),
-        SourceKind::Webp => Some(Ok(decode_first_webp_or_static(path)?)),
-        SourceKind::Static => Some(Ok(decode_static_image(path)?)),
+        SourceKind::Webp => Some(decode_first_webp_or_static(path)),
+        SourceKind::Static => Some(decode_static_image(path)),
     };
 
     let frame =
@@ -96,9 +92,8 @@ pub(crate) fn decode_single_frame_sync(
 /// Opens a streaming APNG frame iterator yielding normalized `RawRgbaFrame` records.
 pub(crate) fn open_apng_iter<'a>(path: &'a Path) -> Result<FrameIterator<'a>, CacheError>
 {
-    let file = File::open(path).map_err(|source| io_err(path, source))?;
-    let png =
-        PngDecoder::new(BufReader::new(file)).map_err(|err| decode_err(path, err.to_string()))?;
+    let png = PngDecoder::new(open_buffered_file(path)?)
+        .map_err(|err| decode_err(path, err.to_string()))?;
     let apng = png
         .apng()
         .map_err(|err| decode_err(path, err.to_string()))?;
@@ -111,35 +106,63 @@ pub(crate) fn open_apng_iter<'a>(path: &'a Path) -> Result<FrameIterator<'a>, Ca
 /// Opens a streaming GIF frame iterator yielding normalized `RawRgbaFrame` records.
 pub(crate) fn open_gif_iter<'a>(path: &'a Path) -> Result<FrameIterator<'a>, CacheError>
 {
-    let file = File::open(path).map_err(|source| io_err(path, source))?;
-    let gif =
-        GifDecoder::new(BufReader::new(file)).map_err(|err| decode_err(path, err.to_string()))?;
+    let gif = GifDecoder::new(open_buffered_file(path)?)
+        .map_err(|err| decode_err(path, err.to_string()))?;
 
     Ok(Box::new(
         gif.into_frames().map(|res| map_image_frame(path, res)),
     ))
 }
 
-/// Decodes frame 0 of a WebP file, falling back to static reader on large canvases.
-pub(crate) fn decode_first_webp_or_static(path: &Path) -> Result<RawRgbaFrame, CacheError>
+/// Reads `path` and invokes `f` with a WebP frame iterator (`None` when libwebp rejects the bitstream).
+pub(crate) fn with_webp_frames<R>(
+    path: &Path,
+    use_threads: bool,
+    f: impl FnOnce(Result<Option<FrameIterator<'_>>, CacheError>) -> R,
+) -> R
 {
-    let bytes = fs::read(path).map_err(|source| io_err(path, source))?;
+    let bytes = match fs::read(path)
+    {
+        Ok(data) => data,
+        Err(source) => return f(Err(io_err(path, source))),
+    };
+
     let options = WebpOptions {
-        use_threads: false,
+        use_threads,
         color_mode: ColorMode::Rgba,
     };
 
-    if let Ok(decoder) = WebpDecoder::new_with_options(&bytes, options)
-        && let Some(frame) = decoder.into_iter().next()
+    let Ok(decoder) = WebpDecoder::new_with_options(&bytes, options)
+    else
     {
+        return f(Ok(None));
+    };
+
+    let mut prev_timestamp = 0_i32;
+    let iter = decoder.into_iter().map(move |frame| {
         let (width, height) = frame.dimensions();
-        let delay_ms = PlaybackClock::normalize_delay_ms(Some(f64::from(frame.timestamp().max(0))));
-        return Ok(RawRgbaFrame {
+        let delta = (frame.timestamp() - prev_timestamp).max(0);
+        prev_timestamp = frame.timestamp();
+        let delay_ms = PlaybackClock::normalize_delay_ms(Some(f64::from(delta)));
+        Ok(RawRgbaFrame {
             width,
             height,
             delay_ms,
             rgba: frame.data().to_vec(),
-        });
+        })
+    });
+
+    f(Ok(Some(Box::new(iter))))
+}
+
+/// Decodes frame 0 of a WebP file, falling back to static reader on large canvases.
+pub(crate) fn decode_first_webp_or_static(path: &Path) -> Result<RawRgbaFrame, CacheError>
+{
+    if let Some(first) = with_webp_frames(path, false, |opened| {
+        opened.map(|opt| opt.and_then(|mut it| it.next()))
+    })?
+    {
+        return first;
     }
 
     decode_static_image(path)
@@ -148,10 +171,7 @@ pub(crate) fn decode_first_webp_or_static(path: &Path) -> Result<RawRgbaFrame, C
 /// Decodes a static image of any supported format into a single RGBA buffer.
 pub(crate) fn decode_static_image(path: &Path) -> Result<RawRgbaFrame, CacheError>
 {
-    let dyn_img = ImageReader::open(path)
-        .map_err(|source| io_err(path, source))?
-        .with_guessed_format()
-        .map_err(|source| io_err(path, source))?
+    let dyn_img = open_guessed_reader(path)?
         .decode()
         .map_err(|err| decode_err(path, err.to_string()))?;
 
@@ -163,6 +183,23 @@ pub(crate) fn decode_static_image(path: &Path) -> Result<RawRgbaFrame, CacheErro
         delay_ms: PlaybackClock::normalize_delay_ms(None),
         rgba: rgba.into_raw(),
     })
+}
+
+/// Opens a buffered file handle mapping OS I/O failures uniformly to `CacheError::Io`.
+fn open_buffered_file(path: &Path) -> Result<BufReader<File>, CacheError>
+{
+    File::open(path)
+        .map(BufReader::new)
+        .map_err(|source| io_err(path, source))
+}
+
+/// Opens a buffered image reader with format guessing applied from file magic bytes.
+fn open_guessed_reader(path: &Path) -> Result<ImageReader<BufReader<File>>, CacheError>
+{
+    ImageReader::open(path)
+        .map_err(|source| io_err(path, source))?
+        .with_guessed_format()
+        .map_err(|source| io_err(path, source))
 }
 
 /// Maps `image::Frame` delay ratios and pixel ownership into `RawRgbaFrame`.

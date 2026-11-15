@@ -1,8 +1,7 @@
 //! Synchronous frame-0 decoding and cancellable background animation worker streaming.
 
-// Filesystem reads, atomic cancellation signals, channels, and worker threads.
+// Atomic cancellation signals, channels, paths, and worker threads.
 use std::{
-    fs,
     path::Path,
     sync::{
         Arc,
@@ -14,23 +13,18 @@ use std::{
 
 // Lanczos3 resizer instantiated per worker thread.
 use fast_image_resize::Resizer;
-// Animated and static WebP decoding backed by `libwebp`.
-use webp_animation::{ColorMode, Decoder as WebpDecoder, DecoderOptions as WebpOptions};
 
 // Codec open helpers, frame encoding helpers, and domain errors.
 use super::{
     codecs::{
         FrameIterator, SourceKind, decode_err, decode_single_frame_sync, decode_static_image,
-        detect_source_kind, io_err, open_apng_iter, open_gif_iter,
+        detect_source_kind, io_err, open_apng_iter, open_gif_iter, with_webp_frames,
     },
     pixel::{
         DecodedFirstFrame, EncodedFrame, RawRgbaFrame, encode_first_frame, encode_subsequent_frame,
     },
 };
-use crate::{
-    error::{CacheError, OverlayError},
-    playback::PlaybackClock,
-};
+use crate::error::{CacheError, OverlayError};
 
 /// Consumer hook receiving background-decoded frames and final stream status.
 pub trait FrameStreamSink: Send + 'static
@@ -176,11 +170,7 @@ fn stream_iter_result<'a>(
         {
             stream_iter_frames(path, iter, base_width, max_frames, cancel, first_tx, sink);
         }
-        Err(err) =>
-        {
-            let _ = first_tx.send(Err(err));
-            sink.on_finish(cancel.load(Ordering::Acquire), Ok(()));
-        }
+        Err(err) => abort_startup_error(err, cancel, first_tx, sink),
     }
 }
 
@@ -202,11 +192,7 @@ fn finish_static_worker(
             let _ = first_tx.send(Ok(first));
             sink.on_finish(cancel.load(Ordering::Acquire), cache_res);
         }
-        Err(err) =>
-        {
-            let _ = first_tx.send(Err(err));
-            sink.on_finish(cancel.load(Ordering::Acquire), Ok(()));
-        }
+        Err(err) => abort_startup_error(err, cancel, first_tx, sink),
     }
 }
 
@@ -220,43 +206,15 @@ fn run_webp_worker(
     sink: Box<dyn FrameStreamSink>,
 )
 {
-    let bytes = match fs::read(path)
+    with_webp_frames(path, true, |opened| match opened
     {
-        Ok(data) => data,
-        Err(source) =>
+        Ok(Some(iter)) =>
         {
-            let _ = first_tx.send(Err(io_err(path, source)));
-            sink.on_finish(cancel.load(Ordering::Acquire), Ok(()));
-            return;
-        }
-    };
-
-    let options = WebpOptions {
-        use_threads: true,
-        color_mode: ColorMode::Rgba,
-    };
-
-    match WebpDecoder::new_with_options(&bytes, options)
-    {
-        Ok(decoder) =>
-        {
-            let mut prev_timestamp = 0_i32;
-            let iter = decoder.into_iter().map(move |frame| {
-                let (width, height) = frame.dimensions();
-                let delta = (frame.timestamp() - prev_timestamp).max(0);
-                prev_timestamp = frame.timestamp();
-                let delay_ms = PlaybackClock::normalize_delay_ms(Some(f64::from(delta)));
-                Ok(RawRgbaFrame {
-                    width,
-                    height,
-                    delay_ms,
-                    rgba: frame.data().to_vec(),
-                })
-            });
             stream_iter_frames(path, iter, base_width, max_frames, cancel, first_tx, sink);
         }
-        Err(_) => finish_static_worker(path, base_width, cancel, first_tx, sink),
-    }
+        Ok(None) => finish_static_worker(path, base_width, cancel, first_tx, sink),
+        Err(err) => abort_startup_error(err, cancel, first_tx, sink),
+    });
 }
 
 /// Streams frame 0 and remaining frames uniformly across APNG, GIF, and WebP iterators.
@@ -272,20 +230,13 @@ fn stream_iter_frames<I>(
     I: Iterator<Item = Result<RawRgbaFrame, CacheError>>,
 {
     let mut resizer = Resizer::new();
-    let Some(first_raw) = pop_first_frame(path, iter.next(), first_tx)
-    else
-    {
-        sink.on_finish(cancel.load(Ordering::Acquire), Ok(()));
-        return;
-    };
-
-    let first = match encode_first_frame(first_raw, base_width, &mut resizer)
+    let first = match next_raw_first_frame(path, iter.next())
+        .and_then(|raw| encode_first_frame(raw, base_width, &mut resizer))
     {
         Ok(frame) => frame,
         Err(err) =>
         {
-            let _ = first_tx.send(Err(err));
-            sink.on_finish(cancel.load(Ordering::Acquire), Ok(()));
+            abort_startup_error(err, cancel, first_tx, sink);
             return;
         }
     };
@@ -325,28 +276,30 @@ fn stream_iter_frames<I>(
     sink.on_finish(cancel.load(Ordering::Acquire), sink_result);
 }
 
-/// Extracts the initial raw frame from an iterator or sends startup error to `first_tx`.
-fn pop_first_frame(
+/// Sends a startup decoding error to the caller and shuts down the sink cleanly.
+fn abort_startup_error(
+    err: CacheError,
+    cancel: &AtomicBool,
+    first_tx: &mpsc::SyncSender<Result<DecodedFirstFrame, CacheError>>,
+    sink: Box<dyn FrameStreamSink>,
+)
+{
+    let _ = first_tx.send(Err(err));
+    sink.on_finish(cancel.load(Ordering::Acquire), Ok(()));
+}
+
+/// Normalizes frame-0 iterator output, converting empty streams into `CacheError::Decode`.
+fn next_raw_first_frame(
     path: &Path,
     item: Option<Result<RawRgbaFrame, CacheError>>,
-    first_tx: &mpsc::SyncSender<Result<DecodedFirstFrame, CacheError>>,
-) -> Option<RawRgbaFrame>
+) -> Result<RawRgbaFrame, CacheError>
 {
     match item
     {
-        Some(Ok(frame)) => Some(frame),
-        Some(Err(err)) =>
-        {
-            let _ = first_tx.send(Err(err));
-            None
-        }
-        None =>
-        {
-            let _ = first_tx.send(Err(decode_err(
-                path,
-                String::from("Animation stream yielded zero frames"),
-            )));
-            None
-        }
+        Some(res) => res,
+        None => Err(decode_err(
+            path,
+            String::from("Animation stream yielded zero frames"),
+        )),
     }
 }
