@@ -1,0 +1,267 @@
+//! Wayland layer-shell parent, image subsurface, viewport scaling, and input-region updates.
+
+// SCTK compositing, layer-shell, SHM pool, and subsurface abstractions.
+use smithay_client_toolkit::{
+    compositor::{CompositorState, Region, SurfaceData},
+    reexports::protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+    shell::{
+        WaylandSurface,
+        wlr_layer::{
+            Anchor, KeyboardInteractivity, Layer, LayerShell, LayerSurface, LayerSurfaceData,
+        },
+    },
+    shm::{
+        Shm,
+        slot::{Buffer, SlotPool},
+    },
+    subcompositor::{SubcompositorState, SubsurfaceData},
+};
+// Raw Wayland protocol surface, subsurface, output, SHM, and viewport objects.
+use wayland_client::{
+    Dispatch, QueueHandle,
+    protocol::{wl_output::WlOutput, wl_shm, wl_subsurface::WlSubsurface, wl_surface::WlSurface},
+};
+use wayland_protocols::wp::viewporter::client::{
+    wp_viewport::WpViewport, wp_viewporter::WpViewporter,
+};
+
+// Chrome subsurfaces, SHM frame ring, monitor metadata, layout, input state, and errors.
+use super::{
+    chrome::OverlayChrome, input::InputState, monitor::MonitorDescriptor, shm_ring::ImageBufferRing,
+};
+use crate::{
+    error::{OverlayError, WaylandError},
+    layout::{HANDLE_SIZE, OverlayLayout},
+};
+
+/// Coordinates parent transparent layer surface, child animation subsurface, and chrome overlays.
+pub(crate) struct OverlayScene
+{
+    /// Fullscreen click-region-controlled parent layer shell surface.
+    pub(crate) parent_layer: LayerSurface,
+
+    /// Child image subsurface hosting decoded video/animation frames.
+    pub(crate) image_surface: WlSurface,
+
+    // Subsurface controller positioning `image_surface` relative to parent.
+    image_subsurface: WlSubsurface,
+
+    // Hardware scaler mapping `frame_width x frame_height` buffer to `(w, h)` logical space.
+    image_viewport: WpViewport,
+
+    // Viewport stretching the 1x1 transparent parent buffer to cover the monitor.
+    parent_viewport: WpViewport,
+
+    // Reusable 1x1 transparent SHM buffer mapped onto `parent_layer`.
+    parent_transparent_buf: Buffer,
+
+    // Owns the shared memory file backing parent transparent buffer, handle, and edit borders.
+    _chrome_pool: SlotPool,
+
+    // Reusable frame ring backing `image_surface`.
+    frame_ring: ImageBufferRing,
+
+    // Corner handle and edit-mode dashed border subsurfaces.
+    chrome: OverlayChrome,
+
+    // Current known monitor width for lazy parent viewport updates.
+    screen_width: u32,
+
+    // Current known monitor height for lazy parent viewport updates.
+    screen_height: u32,
+
+    // Cached last committed edit mode to avoid redundant `set_keyboard_interactivity` commits.
+    last_editing: bool,
+}
+
+impl OverlayScene
+{
+    /// Creates the fullscreen `LayerSurface`, child image subsurface, handle, and edit borders.
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) fn create<D>(
+        qh: &QueueHandle<D>,
+        compositor: &CompositorState,
+        subcompositor: &SubcompositorState,
+        layer_shell: &LayerShell,
+        viewporter: &WpViewporter,
+        shm: &Shm,
+        output: &WlOutput,
+        monitor: &MonitorDescriptor,
+        frame_width: u32,
+        frame_height: u32,
+    ) -> Result<Self, OverlayError>
+    where
+        D: Dispatch<ZwlrLayerSurfaceV1, LayerSurfaceData>
+            + Dispatch<WlSurface, SurfaceData<()>>
+            + Dispatch<WlSubsurface, SubsurfaceData>
+            + Dispatch<WpViewport, ()>
+            + 'static,
+    {
+        let parent_surface = compositor.create_surface(qh);
+        let parent_layer = layer_shell.create_layer_surface(
+            qh,
+            parent_surface,
+            Layer::Overlay,
+            Some("apng-overlay"),
+            Some(output),
+        );
+        parent_layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+        parent_layer.set_exclusive_zone(-1);
+        parent_layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        parent_layer.wl_surface().commit();
+
+        let empty_region = Region::new(compositor)
+            .map_err(|err| WaylandError::ShmPool(format!("Failed creating empty region: {err}")))?;
+
+        let parent_wl = parent_layer.wl_surface().clone();
+        let (image_subsurface, image_surface) =
+            subcompositor.create_subsurface(parent_wl.clone(), qh);
+        image_subsurface.set_desync();
+        image_surface.set_input_region(Some(empty_region.wl_region()));
+
+        let parent_viewport = viewporter.get_viewport(&parent_wl, qh, ());
+        let image_viewport = viewporter.get_viewport(&image_surface, qh, ());
+
+        let sw = (monitor.width.max(1)) as u32;
+        let sh = (monitor.height.max(1)) as u32;
+        let handle_bytes = (HANDLE_SIZE as usize) * (HANDLE_SIZE as usize) * 4;
+        let chrome_bytes = 64 + handle_bytes * 2 + ((sw + sh) as usize) * 8 + 4096;
+        let mut chrome_pool = SlotPool::new(chrome_bytes, shm)
+            .map_err(|err| WaylandError::ShmPool(err.to_string()))?;
+
+        let (parent_transparent_buf, parent_slice) = chrome_pool
+            .create_buffer(1, 1, 4, wl_shm::Format::Argb8888)
+            .map_err(|err| WaylandError::ShmPool(err.to_string()))?;
+        parent_slice.fill(0);
+
+        let chrome = OverlayChrome::create(
+            qh,
+            subcompositor,
+            viewporter,
+            &parent_wl,
+            &image_surface,
+            &empty_region,
+            &mut chrome_pool,
+            sw as i32,
+            sh as i32,
+        )?;
+
+        let frame_ring = ImageBufferRing::new(shm, frame_width, frame_height)?;
+
+        Ok(Self {
+            parent_layer,
+            image_surface,
+            image_subsurface,
+            image_viewport,
+            parent_viewport,
+            parent_transparent_buf,
+            _chrome_pool: chrome_pool,
+            frame_ring,
+            chrome,
+            screen_width: sw,
+            screen_height: sh,
+            last_editing: false,
+        })
+    }
+
+    /// Uploads frame 0 and maps the initial transparent fullscreen layer surface + subsurfaces.
+    pub(crate) fn initialize_first_frame(
+        &mut self,
+        compositor: &CompositorState,
+        layout: &OverlayLayout,
+        input: &InputState,
+        frame0_argb: &[u8],
+    ) -> Result<(), OverlayError>
+    {
+        let (sw, sh) = layout.screen_size();
+        self.screen_width = sw;
+        self.screen_height = sh;
+
+        self.parent_transparent_buf
+            .attach_to(self.parent_layer.wl_surface())
+            .map_err(|err| WaylandError::ShmPool(err.to_string()))?;
+        self.parent_layer.wl_surface().damage_buffer(0, 0, 1, 1);
+        self.parent_viewport.set_destination(sw as i32, sh as i32);
+
+        self.frame_ring
+            .upload_and_attach(&self.image_surface, frame0_argb)?;
+        self.image_surface.commit();
+
+        self.sync_layout(compositor, layout, input)?;
+        Ok(())
+    }
+
+    /// Uploads and commits a new animation frame onto the desynchronized image subsurface.
+    pub(crate) fn present_frame(&mut self, frame_argb: &[u8]) -> Result<(), OverlayError>
+    {
+        self.frame_ring
+            .upload_and_attach(&self.image_surface, frame_argb)?;
+        self.image_surface.commit();
+        Ok(())
+    }
+
+    /// Updates image subsurface position/scale, handle visibility/hover, dashed border, and input region.
+    pub(crate) fn sync_layout(
+        &mut self,
+        compositor: &CompositorState,
+        layout: &OverlayLayout,
+        input: &InputState,
+    ) -> Result<(), OverlayError>
+    {
+        let (sw, sh) = layout.screen_size();
+        if sw != self.screen_width || sh != self.screen_height
+        {
+            self.screen_width = sw;
+            self.screen_height = sh;
+            self.parent_viewport.set_destination(sw as i32, sh as i32);
+        }
+
+        let rect = layout.overlay_rect();
+        self.image_subsurface.set_position(rect.x, rect.y);
+        self.image_viewport
+            .set_destination(rect.width as i32, rect.height as i32);
+
+        let handle_rect = layout.input_rect(false);
+        self.chrome.sync_all(rect, handle_rect, input)?;
+
+        if input.editing != self.last_editing
+        {
+            self.last_editing = input.editing;
+            let interactivity = if input.editing
+            {
+                KeyboardInteractivity::OnDemand
+            }
+            else
+            {
+                KeyboardInteractivity::None
+            };
+            self.parent_layer.set_keyboard_interactivity(interactivity);
+        }
+
+        let input_rect = layout.input_rect(input.editing);
+        let region = Region::new(compositor)
+            .map_err(|err| WaylandError::ShmPool(format!("Failed updating input region: {err}")))?;
+        region.add(
+            input_rect.x,
+            input_rect.y,
+            input_rect.width as i32,
+            input_rect.height as i32,
+        );
+        self.parent_layer
+            .wl_surface()
+            .set_input_region(Some(region.wl_region()));
+
+        self.parent_layer.wl_surface().commit();
+        Ok(())
+    }
+
+    /// Updates only the corner handle buffer opacity/attachment without altering geometry.
+    pub(crate) fn sync_handle_only(
+        &mut self,
+        layout: &OverlayLayout,
+        input: &InputState,
+    ) -> Result<(), OverlayError>
+    {
+        self.chrome.sync_handle(layout.input_rect(false), input)
+    }
+}
