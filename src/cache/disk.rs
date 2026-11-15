@@ -30,6 +30,9 @@ const CACHE_DIGEST_HEX_LEN: usize = 16;
 // Cache payload format version prefix isolating Rust `.lraw` files from legacy `.zraw`.
 const CACHE_KEY_PREFIX: &str = "v2-lraw-argb8888";
 
+// Base application directory name inside XDG cache storage.
+const CACHE_APP_DIR: &str = "apng-overlay";
+
 // Number of seconds in one calendar day for 30-day pruning calculations.
 const SECONDS_PER_DAY: u64 = 86_400;
 
@@ -109,17 +112,20 @@ pub fn compute_cache_paths(
 /// Resolves the default user cache root (`$XDG_CACHE_HOME/apng-overlay` or `~/.cache/apng-overlay`).
 pub fn default_cache_dir() -> Result<PathBuf, CacheError>
 {
-    if let Some(xdg) = env::var_os("XDG_CACHE_HOME")
+    let cache_root = if let Some(xdg) = env::var_os("XDG_CACHE_HOME")
         && !xdg.is_empty()
     {
-        return Ok(PathBuf::from(xdg).join("apng-overlay"));
+        PathBuf::from(xdg)
     }
+    else
+    {
+        let home = env::var_os("HOME")
+            .filter(|path| !path.is_empty())
+            .ok_or(CacheError::DirectoryUnavailable)?;
+        PathBuf::from(home).join(".cache")
+    };
 
-    let home = env::var_os("HOME")
-        .filter(|path| !path.is_empty())
-        .ok_or(CacheError::DirectoryUnavailable)?;
-
-    Ok(PathBuf::from(home).join(".cache").join("apng-overlay"))
+    Ok(cache_root.join(CACHE_APP_DIR))
 }
 
 /// Removes cache files older than `max_age_days`, deleting `.json` markers before data blobs.

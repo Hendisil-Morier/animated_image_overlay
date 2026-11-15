@@ -19,11 +19,8 @@ use tracing_appender::{
 // Multi-layer subscriber composition and severity filtering.
 use tracing_subscriber::{Layer, Registry, filter::LevelFilter, fmt, layer::SubscriberExt};
 
-// Top-level domain error enum for mapping logging initialization failures.
-use crate::error::OverlayError;
-
-// Base application subdirectory under XDG cache storage.
-const CACHE_APP_DIR: &str = "apng-overlay";
+// Top-level domain error enum and shared XDG cache directory resolver.
+use crate::{cache::default_cache_dir, error::OverlayError};
 
 // Subdirectory holding persistent daily-rotated overlay log files.
 const LOGS_SUBDIR: &str = "logs";
@@ -119,26 +116,9 @@ pub fn is_debug_env_enabled() -> bool
 /// Resolves the default log directory path (`$XDG_CACHE_HOME/apng-overlay/logs` or `~/.cache/...`).
 pub fn default_logs_dir() -> Result<PathBuf, OverlayError>
 {
-    let cache_root = resolve_cache_root()?;
-    Ok(cache_root.join(CACHE_APP_DIR).join(LOGS_SUBDIR))
-}
-
-/// Selects the base XDG cache directory from `XDG_CACHE_HOME` or `HOME`.
-fn resolve_cache_root() -> Result<PathBuf, OverlayError>
-{
-    if let Some(xdg) = env::var_os("XDG_CACHE_HOME")
-        && !xdg.is_empty()
-    {
-        return Ok(PathBuf::from(xdg));
-    }
-
-    let home = env::var_os("HOME")
-        .filter(|path| !path.is_empty())
-        .ok_or_else(|| {
-            OverlayError::LoggingInit(String::from("HOME and XDG_CACHE_HOME are both unset"))
-        })?;
-
-    Ok(PathBuf::from(home).join(".cache"))
+    let cache_dir =
+        default_cache_dir().map_err(|err| OverlayError::LoggingInit(err.to_string()))?;
+    Ok(cache_dir.join(LOGS_SUBDIR))
 }
 
 /// Constructs a dual-output `tracing` subscriber targeting stdout and rolling disk files.
