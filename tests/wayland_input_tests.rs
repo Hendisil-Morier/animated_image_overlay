@@ -178,6 +178,18 @@ fn keyboard_shortcuts_operate_only_in_edit_mode()
     assert!(layout.state().scale > 1.0);
 
     assert!(input.on_key_press(Keysym::space, &mut layout).toggle_pause);
+    assert!(!input.on_key_repeat(Keysym::space, &mut layout).toggle_pause);
+    assert!(!input.on_key_repeat(Keysym::q, &mut layout).quit);
+    assert!(
+        input
+            .on_key_repeat(Keysym::Left, &mut layout)
+            .layout_changed
+    );
+    assert!(
+        !input
+            .on_key_repeat(Keysym::Escape, &mut layout)
+            .layout_changed
+    );
 
     let exit_edit = input.on_key_press(Keysym::Escape, &mut layout);
     assert_eq!(exit_edit.edit_mode_changed, Some(false));

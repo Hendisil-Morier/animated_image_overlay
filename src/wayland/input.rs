@@ -8,7 +8,7 @@ use smithay_client_toolkit::seat::{
 
 // Click tracking, keyboard shortcut lookup table, and scroll step helper.
 use super::shortcuts::{
-    ClickTracker, KeyShortcut, TRIPLE_CLICK_DISTANCE_PX, extract_scroll_steps, map_edit_keysym,
+    ClickTracker, KeyShortcut, extract_scroll_steps, map_edit_keysym, within_click_distance,
 };
 // Layout geometry, dragging, zooming, and nudge step constants.
 use crate::layout::{KEYBOARD_NUDGE_PX, KEYBOARD_ZOOM_STEP, OverlayLayout};
@@ -192,7 +192,7 @@ impl InputState
             {
                 let dx = pos.0 - press_pos.0;
                 let dy = pos.1 - press_pos.1;
-                if dx * dx + dy * dy > TRIPLE_CLICK_DISTANCE_PX * TRIPLE_CLICK_DISTANCE_PX
+                if !within_click_distance(pos, press_pos)
                 {
                     self.click_tracker.reset();
                 }
@@ -323,6 +323,23 @@ impl InputState
     /// Executes an edit-mode keyboard shortcut against `layout` when `editing` is active.
     pub fn on_key_press(&mut self, keysym: Keysym, layout: &mut OverlayLayout) -> InputEffects
     {
+        self.apply_key_event(keysym, false, layout)
+    }
+
+    /// Executes repeatable edit-mode navigation/zoom shortcuts on Wayland key-repeat events.
+    pub fn on_key_repeat(&mut self, keysym: Keysym, layout: &mut OverlayLayout) -> InputEffects
+    {
+        self.apply_key_event(keysym, true, layout)
+    }
+
+    /// Dispatches one mapped edit-mode shortcut, filtering non-repeatable actions when `is_repeat`.
+    fn apply_key_event(
+        &mut self,
+        keysym: Keysym,
+        is_repeat: bool,
+        layout: &mut OverlayLayout,
+    ) -> InputEffects
+    {
         if !self.editing
         {
             return InputEffects::default();
@@ -333,6 +350,11 @@ impl InputState
         {
             return InputEffects::default();
         };
+
+        if is_repeat && !shortcut.is_repeatable()
+        {
+            return InputEffects::default();
+        }
 
         let mut effects = InputEffects::default();
         match shortcut

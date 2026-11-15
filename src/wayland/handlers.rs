@@ -339,14 +339,8 @@ impl KeyboardHandler for OverlayRuntime
         event: KeyEvent,
     )
     {
-        if !matches!(
-            event.keysym,
-            Keysym::Escape | Keysym::space | Keysym::q | Keysym::Q
-        )
-        {
-            let effects = self.input.on_key_press(event.keysym, &mut self.layout);
-            self.apply_input_effects(effects);
-        }
+        let effects = self.input.on_key_repeat(event.keysym, &mut self.layout);
+        self.apply_input_effects(effects);
     }
 
     fn release_key(

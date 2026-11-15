@@ -40,6 +40,15 @@ pub enum KeyShortcut
     TogglePause,
 }
 
+impl KeyShortcut
+{
+    /// Returns `true` when holding the key should repeat the shortcut (`Move` / `Scale`).
+    pub const fn is_repeatable(self) -> bool
+    {
+        matches!(self, Self::Move { .. } | Self::Scale { .. })
+    }
+}
+
 /// Recognizes consecutive left mouse presses within `400 ms` and `4 px` as triple-click.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ClickTracker
@@ -61,11 +70,7 @@ impl ClickTracker
     {
         let within_sequence = self.last_time_ms.is_some_and(|prev| {
             let elapsed = time_ms.wrapping_sub(prev);
-            let dx = pos.0 - self.anchor.0;
-            let dy = pos.1 - self.anchor.1;
-            let dist_sq = dx * dx + dy * dy;
-            elapsed <= TRIPLE_CLICK_WINDOW_MS
-                && dist_sq <= TRIPLE_CLICK_DISTANCE_PX * TRIPLE_CLICK_DISTANCE_PX
+            elapsed <= TRIPLE_CLICK_WINDOW_MS && within_click_distance(pos, self.anchor)
         });
 
         if within_sequence
@@ -127,6 +132,14 @@ pub fn map_edit_keysym(keysym: Keysym) -> Option<KeyShortcut>
         Keysym::space => Some(KeyShortcut::TogglePause),
         _ => None,
     }
+}
+
+/// Returns `true` when coordinates `a` and `b` remain within `TRIPLE_CLICK_DISTANCE_PX`.
+pub(crate) fn within_click_distance(a: (f64, f64), b: (f64, f64)) -> bool
+{
+    let dx = a.0 - b.0;
+    let dy = a.1 - b.1;
+    dx * dx + dy * dy <= TRIPLE_CLICK_DISTANCE_PX * TRIPLE_CLICK_DISTANCE_PX
 }
 
 /// Normalizes Wayland wheel/touchpad `AxisScroll` metrics into GTK-compatible discrete steps.
