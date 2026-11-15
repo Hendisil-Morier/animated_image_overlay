@@ -10,6 +10,7 @@ All notable changes to this project are documented here.
 - Added edit-mode `f` and `F` keyboard shortcuts (`FlipAxis`, `KeyShortcut::Flip`, and `Transform::Flipped*` via `wl_surface::set_buffer_transform`) to mirror the overlay horizontally or vertically using dihedral composition with `rotation`, persisted per image via `flipped` inside `apng-overlay.json`.
 
 ### Changed
+- Kept the faded `28x28` corner handle subtly visible (`~15%` opacity via `HANDLE_FADED_ALPHA = 38`) after the 2-second idle timeout instead of detaching invisibly so the grab target stays easy to spot.
 - Generalized `OverlayState::rotation` and `OverlayLayout::rotation` from discrete quarter-turn variants to normalized finite `f64` degrees in `[0.0, 360.0)` while preserving zero-copy Wayland `wl_surface::set_buffer_transform` fast paths on snapped 90-degree multiples.
 - Resampled arbitrary-angle frames directly at physical display resolution via `decode::rotate_argb8888_into` (using 2-pixel `u64` SWAR interior scanlines) and cached them in `DisplayFrameCache` when fitting `-c display`, falling back to direct `ImageBufferRing::fill_and_attach` streaming for larger buffers.
 - Deferred SHM ring resizes during pointer resize drags until button release (`InputState::is_resizing`) while resyncing physical buffer density on compositor scale changes and downscaling oversized quarter-turn animations (`decode::resize_premultiplied_argb8888`) via `OverlayScene::needs_buffer_resync`.

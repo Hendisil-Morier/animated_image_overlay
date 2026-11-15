@@ -7,7 +7,10 @@ use animated_image_widget::{
     wayland::{
         ClickTracker, InputState, KeyShortcut, MonitorDescriptor, PointerCursor,
         TRIPLE_CLICK_WINDOW_MS,
-        chrome::{ChromeGeometry, needs_chrome_rebuild},
+        chrome::{
+            ChromeGeometry, HANDLE_FADED_ALPHA, HANDLE_HOVER_ALPHA, HANDLE_IDLE_ALPHA,
+            handle_opacity_alpha, needs_chrome_rebuild,
+        },
         map_edit_keysym, resolve_monitor_index, wl_transform_for_orientation,
     },
 };
@@ -136,23 +139,29 @@ fn hover_and_edit_state_govern_handle_fade()
     let layout = sample_layout();
     let mut input = InputState::default();
     assert!(input.handle_visible);
+    assert_eq!(handle_opacity_alpha(&input), HANDLE_IDLE_ALPHA);
 
-    // Fade timeout hides handle when passive, unhovered, and idle.
+    // Fade timeout dims handle to a subtle visible resting opacity when passive and idle.
     assert!(input.on_fade_timeout().handle_visual_changed);
     assert!(!input.handle_visible);
+    let faded_alpha = handle_opacity_alpha(&input);
+    assert_eq!(faded_alpha, HANDLE_FADED_ALPHA);
+    assert!(faded_alpha > 0 && faded_alpha < HANDLE_IDLE_ALPHA);
 
-    // Hovering restores handle and cancels fade timer.
+    // Hovering restores full active highlight and cancels fade timer.
     let enter = input.on_pointer_enter();
     assert!(enter.handle_visual_changed);
     assert!(enter.cancel_fade_timer);
     assert!(input.handle_visible);
+    assert_eq!(handle_opacity_alpha(&input), HANDLE_HOVER_ALPHA);
 
     // While hovered, fade timeout is a no-op.
     assert!(!input.on_fade_timeout().handle_visual_changed);
 
-    // Leaving arms fade timer.
+    // Leaving arms fade timer and drops back to idle opacity.
     let leave = input.on_pointer_leave();
     assert!(leave.reset_fade_timer);
+    assert_eq!(handle_opacity_alpha(&input), HANDLE_IDLE_ALPHA);
 
     // Middle-click while passive exits cleanly.
     assert!(
@@ -549,6 +558,7 @@ fn chrome_geometry_and_rebuild_policy_scale_hidpi_and_monitor_growth()
     assert_eq!(g2.handle_radius_px, 16);
     assert_eq!(g2.outline_thickness_px, 2);
     assert_eq!(g2.dash_period_px, 24);
+    assert!(g2.pool_byte_budget(1920, 1080) >= g2.handle_buffer_bytes() * 3);
     assert_eq!(g2.edge_buffer_size(1920, true), (3840, 2));
     assert_eq!(g2.edge_buffer_size(1080, false), (2, 2160));
     assert_eq!(g2.edge_viewport_crop(420, 1920, true), (840.0, 2.0, 420, 1));

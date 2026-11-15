@@ -110,7 +110,7 @@ pub struct InputState
     /// Whether cursor currently rests inside the overlay input region.
     pub hovered: bool,
 
-    /// Whether the 28x28 corner handle is visibly displayed (initially visible before fade).
+    /// Whether the 28x28 corner handle shows full idle opacity rather than faded resting opacity.
     pub handle_visible: bool,
 
     /// Current pointer drag gesture state.

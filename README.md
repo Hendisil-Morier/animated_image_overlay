@@ -36,7 +36,7 @@ Pass `-d` / `--debug` (or set `OVERLAY_DEBUG=1`) to mirror debug diagnostics to 
 
 ## Controls
 
-By default, only a `28x28 px` handle in the bottom-right corner accepts pointer input while the rest of the image passes clicks through to windows underneath (`KeyboardInteractivity::None`). The handle fades out after 2 seconds of inactivity and reappears on hover or drag.
+By default, only a `28x28 px` handle in the bottom-right corner accepts pointer input while the rest of the image passes clicks through to windows underneath (`KeyboardInteractivity::None`). The handle dims to a faint resting pill after 2 seconds of inactivity (`~15%` opacity) and brightens on hover or drag.
 
 Pointer controls:
 - **Left-drag**: Move the overlay.

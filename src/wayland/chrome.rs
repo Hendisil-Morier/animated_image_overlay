@@ -36,11 +36,31 @@ use crate::{
 // Corner radius of the rendered 28x28 corner handle matching CSS `border-radius: 8px`.
 const HANDLE_CORNER_RADIUS: u32 = 8;
 
-// Idle handle opacity byte (~0.25 * 255).
-const HANDLE_IDLE_ALPHA: u8 = 64;
+/// Faded resting handle opacity byte (`~0.15 * 255`) kept visible after the 2-second fade timeout.
+pub const HANDLE_FADED_ALPHA: u8 = 38;
 
-// Hovered handle opacity byte (~0.85 * 255).
-const HANDLE_HOVER_ALPHA: u8 = 217;
+/// Idle handle opacity byte (`~0.25 * 255`) shown before fade and in edit mode.
+pub const HANDLE_IDLE_ALPHA: u8 = 64;
+
+/// Hovered handle opacity byte (`~0.85 * 255`) shown under pointer hover or drag.
+pub const HANDLE_HOVER_ALPHA: u8 = 217;
+
+/// Selects the corner handle opacity byte matching `input` visibility, edit, hover, and drag states.
+pub fn handle_opacity_alpha(input: &InputState) -> u8
+{
+    if input.hovered || input.is_dragging()
+    {
+        HANDLE_HOVER_ALPHA
+    }
+    else if input.handle_visible || input.editing
+    {
+        HANDLE_IDLE_ALPHA
+    }
+    else
+    {
+        HANDLE_FADED_ALPHA
+    }
+}
 
 // Thickness in logical pixels of each edit-mode dashed border subsurface.
 const OUTLINE_THICKNESS: i32 = 1;
@@ -133,7 +153,7 @@ impl ChromeGeometry
         (f64::from(src_w), f64::from(src_h), dst_w, dst_h)
     }
 
-    /// Computes total SHM pool bytes needed for two handle buffers and four scaled border edges.
+    /// Computes total SHM pool bytes needed for three handle buffers and four scaled border edges.
     pub fn pool_byte_budget(self, max_width: i32, max_height: i32) -> usize
     {
         let (hw, hh) = self.edge_buffer_size(max_width, true);
@@ -146,7 +166,7 @@ impl ChromeGeometry
             .saturating_mul(BYTES_PER_PIXEL);
 
         self.handle_buffer_bytes()
-            .saturating_mul(2)
+            .saturating_mul(3)
             .saturating_add(horiz_bytes.saturating_mul(2))
             .saturating_add(vert_bytes.saturating_mul(2))
             .saturating_add(CHROME_POOL_HEADROOM_BYTES)
@@ -202,14 +222,48 @@ pub(crate) struct OverlayChrome
     // Child surface displaying the 28x28 rounded corner handle.
     handle_surface: WlSurface,
 
-    // Pre-rendered idle handle buffer (~25% opacity white rounded pill).
-    handle_idle_buf: Buffer,
-
-    // Pre-rendered hovered/active handle buffer (~85% opacity white rounded pill).
-    handle_hover_buf: Buffer,
+    // Pre-rendered faded, idle, and hover handle SHM buffers.
+    handles: HandleBuffers,
 
     // Four dashed border edge subsurfaces `[top, bottom, left, right]` shown in edit mode.
     edges: [OutlineEdge; 4],
+}
+
+/// Pre-rendered rounded handle buffers spanning faded resting, idle, and active hover states.
+struct HandleBuffers
+{
+    // Subtle resting handle kept visible after the 2-second fade timeout (~15% opacity).
+    faded: Buffer,
+
+    // Standard idle handle shown for 2 seconds after pointer exit or in edit mode (~25% opacity).
+    idle: Buffer,
+
+    // High-contrast handle shown while hovered or actively dragging (~85% opacity).
+    hover: Buffer,
+}
+
+impl HandleBuffers
+{
+    /// Allocates faded, idle, and hover handle buffers at `geom` scale inside `pool`.
+    fn create(pool: &mut SlotPool, geom: ChromeGeometry) -> Result<Self, OverlayError>
+    {
+        Ok(Self {
+            faded: create_handle_buffer(pool, geom, HANDLE_FADED_ALPHA)?,
+            idle: create_handle_buffer(pool, geom, HANDLE_IDLE_ALPHA)?,
+            hover: create_handle_buffer(pool, geom, HANDLE_HOVER_ALPHA)?,
+        })
+    }
+
+    /// Returns the handle buffer matching `input` interaction state.
+    fn for_input(&self, input: &InputState) -> &Buffer
+    {
+        match handle_opacity_alpha(input)
+        {
+            HANDLE_HOVER_ALPHA => &self.hover,
+            HANDLE_IDLE_ALPHA => &self.idle,
+            _ => &self.faded,
+        }
+    }
 }
 
 /// One dashed border strip subsurface cropped dynamically via `wp_viewport`.
@@ -266,8 +320,7 @@ impl OverlayChrome
         handle_subsurface.place_above(image_surface);
         handle_surface.set_buffer_scale(geom.scale);
 
-        let handle_idle_buf = create_handle_buffer(&mut pool, geom, HANDLE_IDLE_ALPHA)?;
-        let handle_hover_buf = create_handle_buffer(&mut pool, geom, HANDLE_HOVER_ALPHA)?;
+        let handles = HandleBuffers::create(&mut pool, geom)?;
 
         let edge_specs = [
             (max_width, true),
@@ -302,8 +355,7 @@ impl OverlayChrome
             max_height,
             handle_subsurface,
             handle_surface,
-            handle_idle_buf,
-            handle_hover_buf,
+            handles,
             edges,
         })
     }
@@ -334,8 +386,7 @@ impl OverlayChrome
         let mut new_pool = SlotPool::new(geom.pool_byte_budget(next_max_w, next_max_h), shm)
             .map_err(shm_pool_err)?;
 
-        let new_idle = create_handle_buffer(&mut new_pool, geom, HANDLE_IDLE_ALPHA)?;
-        let new_hover = create_handle_buffer(&mut new_pool, geom, HANDLE_HOVER_ALPHA)?;
+        let new_handles = HandleBuffers::create(&mut new_pool, geom)?;
         let mut new_edge_bufs = Vec::with_capacity(4);
         for edge in &self.edges
         {
@@ -353,8 +404,7 @@ impl OverlayChrome
             ));
         }
 
-        self.handle_idle_buf = new_idle;
-        self.handle_hover_buf = new_hover;
+        self.handles = new_handles;
         for (edge, (buf, span)) in self.edges.iter_mut().zip(new_edge_bufs)
         {
             edge.buffer = buf;
@@ -394,7 +444,7 @@ impl OverlayChrome
         Ok(())
     }
 
-    /// Positions and attaches the appropriate rounded corner handle (or detaches when hidden).
+    /// Positions and attaches the faded, idle, or hover rounded corner handle buffer.
     pub(crate) fn sync_handle(
         &mut self,
         rect: LogicalRect,
@@ -402,23 +452,7 @@ impl OverlayChrome
     ) -> Result<(), OverlayError>
     {
         self.handle_subsurface.set_position(rect.x, rect.y);
-        let visible = input.handle_visible || input.editing || input.hovered || input.is_dragging();
-
-        if !visible
-        {
-            self.handle_surface.attach(None, 0, 0);
-            self.handle_surface.commit();
-            return Ok(());
-        }
-
-        let active_buf = if input.hovered || input.is_dragging()
-        {
-            &self.handle_hover_buf
-        }
-        else
-        {
-            &self.handle_idle_buf
-        };
+        let active_buf = self.handles.for_input(input);
 
         let geom = ChromeGeometry::for_scale(self.scale);
         let px = geom.handle_px as i32;
