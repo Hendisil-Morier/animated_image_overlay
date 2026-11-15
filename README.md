@@ -49,6 +49,7 @@ Edit-mode keyboard shortcuts:
 - `q`: Quit cleanly.
 - Arrow keys or `h` / `j` / `k` / `l`: Nudge position by `10 px`.
 - `+` / `=` / `-`: Step scale up or down.
+- `r` / `R`: Rotate 90 degrees clockwise or counter-clockwise (per-session only).
 - `Space`: Pause or resume animation playback.
 
 Signals:

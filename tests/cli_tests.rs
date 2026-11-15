@@ -158,6 +158,8 @@ fn cli_handles_help_flag_as_early_exit()
         "Esc",
         "hjkl",
         "+ / -",
+        "r / R",
+        "Rotate 90 degrees",
         "Space",
         "q",
     ]

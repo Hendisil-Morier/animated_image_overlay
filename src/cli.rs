@@ -33,6 +33,7 @@ Edit mode keys:
   Esc                               Exit edit mode back to click-through playback
   Arrows / hjkl                     Nudge overlay position
   + / -                             Zoom scale up or down
+  r / R                             Rotate 90 degrees clockwise or counter-clockwise
   Space                             Pause or resume animation
   q                                 Quit overlay";
 
