@@ -100,6 +100,30 @@ pub struct InputEffects
     pub quit: bool,
 }
 
+impl InputEffects
+{
+    /// Combines scene-related synchronization flags from `next` into `self` for batch coalescing.
+    pub fn merge_scene_flags(&mut self, next: Self)
+    {
+        self.layout_changed |= next.layout_changed;
+        self.frame_redraw_needed |= next.frame_redraw_needed;
+        if let Some(editing) = next.edit_mode_changed
+        {
+            self.edit_mode_changed = Some(editing);
+        }
+        self.handle_visual_changed |= next.handle_visual_changed;
+    }
+
+    /// Reports whether any scene surface, buffer, layout, or handle state needs synchronization.
+    pub fn has_scene_updates(self) -> bool
+    {
+        self.layout_changed
+            || self.frame_redraw_needed
+            || self.edit_mode_changed.is_some()
+            || self.handle_visual_changed
+    }
+}
+
 /// Pure pointer + keyboard interaction state driving handle hover, drags, scroll, and editing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputState

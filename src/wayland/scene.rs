@@ -66,18 +66,22 @@ pub fn wl_transform_for_orientation(rotation: Rotation, flipped: bool) -> Transf
     }
 }
 
-/// Creates a desynchronized child subsurface with empty click-through input region.
-pub(crate) fn create_desync_passive_subsurface<D>(
+/// Creates a click-through child subsurface in either synchronized (`desync == false`) or desync mode.
+pub(crate) fn create_passive_subsurface<D>(
     subcompositor: &SubcompositorState,
     parent: &WlSurface,
     empty_region: &Region,
     qh: &QueueHandle<D>,
+    desync: bool,
 ) -> (WlSubsurface, WlSurface)
 where
     D: Dispatch<WlSurface, SurfaceData<()>> + Dispatch<WlSubsurface, SubsurfaceData> + 'static,
 {
     let (subsurface, surface) = subcompositor.create_subsurface(parent.clone(), qh);
-    subsurface.set_desync();
+    if desync
+    {
+        subsurface.set_desync();
+    }
     surface.set_input_region(Some(empty_region.wl_region()));
     (subsurface, surface)
 }
@@ -126,6 +130,12 @@ pub(crate) struct OverlayScene
 
     // Cached last committed `wp_viewport` destination size on `image_surface`.
     last_image_dest: (i32, i32),
+
+    // Cached last committed `image_subsurface` coordinates `(x, y)`.
+    last_image_pos: Option<(i32, i32)>,
+
+    // Cached last committed pointer input region rectangle on `parent_layer`.
+    last_input_rect: Option<LogicalRect>,
 }
 
 impl OverlayScene
@@ -170,7 +180,7 @@ impl OverlayScene
 
         let parent_wl = parent_layer.wl_surface().clone();
         let (image_subsurface, image_surface) =
-            create_desync_passive_subsurface(subcompositor, &parent_wl, &empty_region, qh);
+            create_passive_subsurface(subcompositor, &parent_wl, &empty_region, qh, true);
 
         let parent_viewport = viewporter.get_viewport(&parent_wl, qh, ());
         let image_viewport = viewporter.get_viewport(&image_surface, qh, ());
@@ -217,6 +227,8 @@ impl OverlayScene
             last_editing: false,
             last_buffer_transform: Transform::Normal,
             last_image_dest: (0, 0),
+            last_image_pos: None,
+            last_input_rect: None,
         })
     }
 
@@ -341,8 +353,8 @@ impl OverlayScene
         self.sync_layout_inner(compositor, shm, layout, input, false)
     }
 
-    /// Applies layout updates onto parent and image subsurfaces, forcing `image_surface.commit()`
-    /// whenever a new buffer was staged immediately beforehand.
+    /// Applies layout updates onto parent and image subsurfaces, committing `parent_layer` before
+    /// `image_surface` whenever image geometry, transform, position, or buffer updates need commit.
     fn sync_layout_inner(
         &mut self,
         compositor: &CompositorState,
@@ -356,14 +368,18 @@ impl OverlayScene
         self.sync_parent_viewport(sw, sh);
 
         let rect = layout.overlay_rect();
-        self.sync_image_surface_state(layout, rect, force_image_commit);
-
         let handle_rect = layout.input_rect(false);
         self.chrome
             .sync_all(shm, (sw, sh), rect, handle_rect, input)?;
 
         self.sync_interactivity_and_input_region(compositor, layout, input.editing)?;
+        let image_commit_needed =
+            self.prepare_image_surface_state(layout, rect, force_image_commit);
         self.parent_layer.wl_surface().commit();
+        if image_commit_needed
+        {
+            self.image_surface.commit();
+        }
         Ok(())
     }
 
@@ -380,15 +396,23 @@ impl OverlayScene
         self.parent_viewport.set_destination(sw as i32, sh as i32);
     }
 
-    /// Updates image subsurface coordinates, viewport destination, buffer transform, and commit state.
-    fn sync_image_surface_state(
+    /// Updates image subsurface coordinates, viewport destination, and buffer transform.
+    ///
+    /// Returns `true` when `image_surface.commit()` must run after committing `parent_layer`.
+    fn prepare_image_surface_state(
         &mut self,
         layout: &OverlayLayout,
         rect: LogicalRect,
         force_image_commit: bool,
-    )
+    ) -> bool
     {
-        self.image_subsurface.set_position(rect.x, rect.y);
+        let pos = (rect.x, rect.y);
+        let pos_changed = self.last_image_pos != Some(pos);
+        if pos_changed
+        {
+            self.last_image_pos = Some(pos);
+            self.image_subsurface.set_position(pos.0, pos.1);
+        }
 
         let dst = (rect.width as i32, rect.height as i32);
         let mut image_state_changed = force_image_commit;
@@ -427,10 +451,14 @@ impl OverlayScene
             image_state_changed = true;
         }
 
-        if image_state_changed
+        if pos_changed && !image_state_changed
         {
-            self.image_surface.commit();
+            // Mark minimal buffer damage on pure moves so compositors repaint `image_surface`.
+            self.image_surface.damage_buffer(0, 0, 1, 1);
+            image_state_changed = true;
         }
+
+        image_state_changed
     }
 
     /// Syncs layer-shell keyboard interactivity and pointer input region for `editing`.
@@ -456,6 +484,11 @@ impl OverlayScene
         }
 
         let input_rect = layout.input_rect(editing);
+        if self.last_input_rect == Some(input_rect)
+        {
+            return Ok(());
+        }
+
         let region = Region::new(compositor)
             .map_err(|err| WaylandError::ShmPool(format!("Failed updating input region: {err}")))?;
         region.add(
@@ -467,16 +500,21 @@ impl OverlayScene
         self.parent_layer
             .wl_surface()
             .set_input_region(Some(region.wl_region()));
+        self.last_input_rect = Some(input_rect);
         Ok(())
     }
 
-    /// Updates only the corner handle buffer opacity/attachment without altering geometry.
+    /// Updates only the corner handle buffer opacity/attachment and commits `parent_layer` when changed.
     pub(crate) fn sync_handle_only(
         &mut self,
         layout: &OverlayLayout,
         input: &InputState,
     ) -> Result<(), OverlayError>
     {
-        self.chrome.sync_handle(layout.input_rect(false), input)
+        if self.chrome.sync_handle(layout.input_rect(false), input)?
+        {
+            self.parent_layer.wl_surface().commit();
+        }
+        Ok(())
     }
 }

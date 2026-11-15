@@ -29,7 +29,7 @@ pub use super::chrome_raster::{
 use super::{
     chrome_raster::{OUTLINE_ALPHA, OUTLINE_THICKNESS, fill_dashed_argb, fill_rounded_handle_argb},
     input::InputState,
-    scene::create_desync_passive_subsurface,
+    scene::create_passive_subsurface,
     shm_ring::{create_argb_buffer, shm_pool_err},
 };
 use crate::{
@@ -63,6 +63,15 @@ pub(crate) struct OverlayChrome
 
     // Four dashed border edge subsurfaces `[top, bottom, left, right]` shown in edit mode.
     edges: [OutlineEdge; 4],
+
+    // Whether dashed outline edges currently have buffers attached.
+    outline_visible: bool,
+
+    // Cached last committed corner handle subsurface coordinates `(x, y)`.
+    last_handle_pos: Option<(i32, i32)>,
+
+    // Cached last attached corner handle `(alpha, scale)` to avoid redundant attaches.
+    last_handle_appearance: Option<(u8, i32)>,
 }
 
 /// Pre-rendered rounded handle buffers spanning faded resting, idle, and active hover states.
@@ -122,6 +131,9 @@ struct OutlineEdge
 
     // `true` for horizontal top/bottom strips, `false` for vertical left/right strips.
     horizontal: bool,
+
+    // Cached last committed `(x, y, span, scale)` placement to avoid redundant updates.
+    last_placement: Option<(i32, i32, i32, i32)>,
 }
 
 impl OverlayChrome
@@ -152,9 +164,8 @@ impl OverlayChrome
             .map_err(shm_pool_err)?;
 
         let (handle_subsurface, handle_surface) =
-            create_desync_passive_subsurface(subcompositor, parent_wl, empty_region, qh);
+            create_passive_subsurface(subcompositor, parent_wl, empty_region, qh, false);
         handle_subsurface.place_above(image_surface);
-        handle_surface.set_buffer_scale(geom.scale);
 
         let handles = HandleBuffers::create(&mut pool, geom)?;
 
@@ -193,6 +204,9 @@ impl OverlayChrome
             handle_surface,
             handles,
             edges,
+            outline_visible: false,
+            last_handle_pos: None,
+            last_handle_appearance: None,
         })
     }
 
@@ -245,11 +259,12 @@ impl OverlayChrome
         {
             edge.buffer = buf;
             edge.max_len = span;
+            edge.last_placement = None;
         }
-        self.handle_surface.set_buffer_scale(geom.scale);
         self.scale = geom.scale;
         self.max_width = next_max_w;
         self.max_height = next_max_h;
+        self.last_handle_appearance = None;
 
         let retired_pool = mem::replace(&mut self.pool, new_pool);
         Ok(Some(retired_pool))
@@ -275,44 +290,75 @@ impl OverlayChrome
         let need_h = (screen_size.1 as i32).max(overlay_rect.height as i32);
         let _retired_pool = self.ensure_scale_and_bounds(shm, self.scale, need_w, need_h)?;
 
-        self.sync_handle(handle_rect, input)?;
+        let _ = self.sync_handle(handle_rect, input)?;
         self.sync_outline(overlay_rect, input.editing);
         Ok(())
     }
 
     /// Positions and attaches the faded, idle, or hover rounded corner handle buffer.
+    ///
+    /// Returns `true` when `handle_surface.commit()` ran for the synchronized handle subsurface.
     pub(crate) fn sync_handle(
         &mut self,
         rect: LogicalRect,
         input: &InputState,
-    ) -> Result<(), OverlayError>
+    ) -> Result<bool, OverlayError>
     {
-        self.handle_subsurface.set_position(rect.x, rect.y);
-        let active_buf = self.handles.for_input(input);
+        let pos = (rect.x, rect.y);
+        let variant = handle_opacity_alpha(input);
+        let scale = self.scale;
+        let pos_changed = self.last_handle_pos != Some(pos);
+        let appearance_changed = self.last_handle_appearance != Some((variant, scale));
+        if !pos_changed && !appearance_changed
+        {
+            return Ok(false);
+        }
 
-        let geom = ChromeGeometry::for_scale(self.scale);
-        let px = geom.handle_px as i32;
-        self.handle_surface.set_buffer_scale(geom.scale);
-        // Ignore `AlreadyActive` when the active buffer stays unchanged across refreshes.
-        let _ = active_buf.attach_to(&self.handle_surface);
-        self.handle_surface.damage_buffer(0, 0, px, px);
+        if pos_changed
+        {
+            self.last_handle_pos = Some(pos);
+            self.handle_subsurface.set_position(pos.0, pos.1);
+        }
+
+        if appearance_changed
+        {
+            let geom = ChromeGeometry::for_scale(scale);
+            let px = geom.handle_px as i32;
+            if self
+                .last_handle_appearance
+                .is_none_or(|(_, prev_scale)| prev_scale != scale)
+            {
+                self.handle_surface.set_buffer_scale(geom.scale);
+            }
+            let active_buf = self.handles.for_input(input);
+            // Ignore `AlreadyActive` when the active buffer stays unchanged across refreshes.
+            let _ = active_buf.attach_to(&self.handle_surface);
+            self.handle_surface.damage_buffer(0, 0, px, px);
+            self.last_handle_appearance = Some((variant, scale));
+        }
+        else
+        {
+            // Keep child invalidation non-empty so compositors repaint on `set_position`.
+            self.handle_surface.damage_buffer(0, 0, 1, 1);
+        }
+
         self.handle_surface.commit();
-        Ok(())
+        Ok(true)
     }
 
-    /// Shows and crops the 4 dashed border subsurfaces around `rect` during edit mode.
+    /// Shows, updates, or hides the 4 dashed border subsurfaces around `rect` during edit mode.
     fn sync_outline(&mut self, rect: LogicalRect, editing: bool)
     {
         if !editing
         {
-            for edge in &self.edges
+            if self.outline_visible
             {
-                edge.surface.attach(None, 0, 0);
-                edge.surface.commit();
+                self.hide_outline();
             }
             return;
         }
 
+        self.outline_visible = true;
         let geom = ChromeGeometry::for_scale(self.scale);
         let w = (rect.width as i32).max(1);
         let h = (rect.height as i32).max(1);
@@ -323,28 +369,62 @@ impl OverlayChrome
             (rect.x + w - OUTLINE_THICKNESS, rect.y, h),
         ];
 
-        for (edge, (ex, ey, span)) in self.edges.iter().zip(placements)
+        for (edge, (ex, ey, span)) in self.edges.iter_mut().zip(placements)
         {
             edge.apply_placement(geom, ex, ey, span);
         }
+    }
+
+    /// Detaches outline buffers when exiting edit mode and clears cached edge placements.
+    fn hide_outline(&mut self)
+    {
+        for edge in &mut self.edges
+        {
+            edge.surface.attach(None, 0, 0);
+            edge.surface.commit();
+            edge.last_placement = None;
+        }
+        self.outline_visible = false;
     }
 }
 
 impl OutlineEdge
 {
-    /// Positions, attaches, viewport-crops, and commits one outline border edge.
-    fn apply_placement(&self, geom: ChromeGeometry, x: i32, y: i32, span: i32)
+    /// Positions, attaches, viewport-crops, and commits one outline border edge when changed.
+    fn apply_placement(&mut self, geom: ChromeGeometry, x: i32, y: i32, span: i32)
     {
-        self.subsurface.set_position(x, y);
-        let _ = self.buffer.attach_to(&self.surface);
+        let next = (x, y, span, geom.scale);
+        if self.last_placement == Some(next)
+        {
+            return;
+        }
 
-        let (src_w, src_h, dst_w, dst_h) =
-            geom.edge_viewport_crop(span, self.max_len, self.horizontal);
+        let prev = self.last_placement;
+        if prev.is_none_or(|(px, py, _, _)| (px, py) != (x, y))
+        {
+            self.subsurface.set_position(x, y);
+        }
+        if prev.is_none_or(|(_, _, _, pscale)| pscale != geom.scale)
+        {
+            let _ = self.buffer.attach_to(&self.surface);
+        }
 
-        self.viewport.set_source(0.0, 0.0, src_w, src_h);
-        self.viewport.set_destination(dst_w, dst_h);
-        self.surface.damage_buffer(0, 0, src_w as i32, src_h as i32);
+        if prev.is_none_or(|(_, _, pspan, pscale)| (pspan, pscale) != (span, geom.scale))
+        {
+            let (src_w, src_h, dst_w, dst_h) =
+                geom.edge_viewport_crop(span, self.max_len, self.horizontal);
+            self.viewport.set_source(0.0, 0.0, src_w, src_h);
+            self.viewport.set_destination(dst_w, dst_h);
+            self.surface.damage_buffer(0, 0, src_w as i32, src_h as i32);
+        }
+        else
+        {
+            // Keep child invalidation non-empty so compositors repaint on `set_position`.
+            self.surface.damage_buffer(0, 0, 1, 1);
+        }
+
         self.surface.commit();
+        self.last_placement = Some(next);
     }
 }
 
@@ -406,7 +486,7 @@ where
 {
     let len = length.max(1);
     let (subsurface, surface) =
-        create_desync_passive_subsurface(subcompositor, parent, empty_region, qh);
+        create_passive_subsurface(subcompositor, parent, empty_region, qh, false);
     subsurface.place_below(handle_surface);
 
     let viewport = viewporter.get_viewport(&surface, qh, ());
@@ -419,5 +499,6 @@ where
         buffer,
         max_len: len,
         horizontal,
+        last_placement: None,
     })
 }

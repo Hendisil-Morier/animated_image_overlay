@@ -292,6 +292,70 @@ impl SeatHandler for OverlayRuntime
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlSeat) {}
 }
 
+impl OverlayRuntime
+{
+    /// Translates one pointer event into input state transitions and side-effect flags.
+    fn handle_pointer_event(&mut self, event: &PointerEvent) -> InputEffects
+    {
+        match event.kind
+        {
+            PointerEventKind::Enter { .. } =>
+            {
+                tracing::debug!(
+                    x = event.position.0,
+                    y = event.position.1,
+                    editing = self.input.editing,
+                    overlay = ?self.layout.overlay_rect(),
+                    input = ?self.layout.input_rect(self.input.editing),
+                    "Pointer entered overlay surface"
+                );
+                self.input.on_pointer_enter()
+            }
+            PointerEventKind::Leave { .. } =>
+            {
+                self.last_cursor = None;
+                tracing::debug!(
+                    x = event.position.0,
+                    y = event.position.1,
+                    "Pointer left overlay surface"
+                );
+                self.input.on_pointer_leave()
+            }
+            PointerEventKind::Motion { .. } => self
+                .input
+                .on_pointer_motion(event.position, &mut self.layout),
+            PointerEventKind::Press { time, button, .. } =>
+            {
+                tracing::debug!(
+                    button,
+                    x = event.position.0,
+                    y = event.position.1,
+                    editing = self.input.editing,
+                    overlay = ?self.layout.overlay_rect(),
+                    "Pointer button pressed"
+                );
+                self.input
+                    .on_button_press(button, time, event.position, &self.layout)
+            }
+            PointerEventKind::Release { button, .. } =>
+            {
+                tracing::debug!(
+                    button,
+                    x = event.position.0,
+                    y = event.position.1,
+                    overlay = ?self.layout.overlay_rect(),
+                    "Pointer button released"
+                );
+                self.input.on_button_release(button)
+            }
+            PointerEventKind::Axis { vertical, .. } =>
+            {
+                self.input.on_scroll(vertical, &mut self.layout)
+            }
+        }
+    }
+}
+
 impl PointerHandler for OverlayRuntime
 {
     fn pointer_frame(
@@ -302,70 +366,28 @@ impl PointerHandler for OverlayRuntime
         events: &[PointerEvent],
     )
     {
+        let mut pending_scene = InputEffects::default();
+        let mut cursor_pos: Option<(f64, f64)> = None;
+
         for event in events
         {
-            let effects = match event.kind
+            let is_leave = matches!(event.kind, PointerEventKind::Leave { .. });
+            let effects = self.handle_pointer_event(event);
+            if self.apply_immediate_effects(effects)
             {
-                PointerEventKind::Enter { .. } =>
-                {
-                    tracing::debug!(
-                        x = event.position.0,
-                        y = event.position.1,
-                        editing = self.input.editing,
-                        overlay = ?self.layout.overlay_rect(),
-                        input = ?self.layout.input_rect(self.input.editing),
-                        "Pointer entered overlay surface"
-                    );
-                    self.input.on_pointer_enter()
-                }
-                PointerEventKind::Leave { .. } =>
-                {
-                    self.last_cursor = None;
-                    tracing::debug!(
-                        x = event.position.0,
-                        y = event.position.1,
-                        "Pointer left overlay surface"
-                    );
-                    self.input.on_pointer_leave()
-                }
-                PointerEventKind::Motion { .. } => self
-                    .input
-                    .on_pointer_motion(event.position, &mut self.layout),
-                PointerEventKind::Press { time, button, .. } =>
-                {
-                    tracing::debug!(
-                        button,
-                        x = event.position.0,
-                        y = event.position.1,
-                        editing = self.input.editing,
-                        overlay = ?self.layout.overlay_rect(),
-                        "Pointer button pressed"
-                    );
-                    self.input
-                        .on_button_press(button, time, event.position, &self.layout)
-                }
-                PointerEventKind::Release { button, .. } =>
-                {
-                    tracing::debug!(
-                        button,
-                        x = event.position.0,
-                        y = event.position.1,
-                        overlay = ?self.layout.overlay_rect(),
-                        "Pointer button released"
-                    );
-                    self.input.on_button_release(button)
-                }
-                PointerEventKind::Axis { vertical, .. } =>
-                {
-                    self.input.on_scroll(vertical, &mut self.layout)
-                }
-            };
-
-            self.apply_input_effects(effects);
-            if !matches!(event.kind, PointerEventKind::Leave { .. })
-            {
-                self.update_pointer_cursor(event.position);
+                return;
             }
+            pending_scene.merge_scene_flags(effects);
+            cursor_pos = if is_leave { None } else { Some(event.position) };
+        }
+
+        if pending_scene.has_scene_updates()
+        {
+            self.sync_scene_for_effects(pending_scene);
+        }
+        if let Some(pos) = cursor_pos
+        {
+            self.update_pointer_cursor(pos);
         }
     }
 }

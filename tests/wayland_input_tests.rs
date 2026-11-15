@@ -5,7 +5,7 @@ use animated_image_widget::{
     config::OverlayState,
     layout::{FlipAxis, KEYBOARD_NUDGE_PX, OverlayLayout, Rotation},
     wayland::{
-        ClickTracker, InputState, KeyShortcut, MonitorDescriptor, PointerCursor,
+        ClickTracker, InputEffects, InputState, KeyShortcut, MonitorDescriptor, PointerCursor,
         TRIPLE_CLICK_WINDOW_MS,
         chrome::{
             ChromeGeometry, HANDLE_FADED_ALPHA, HANDLE_HOVER_ALPHA, HANDLE_IDLE_ALPHA,
@@ -616,4 +616,35 @@ fn orientation_maps_to_expected_wayland_buffer_transforms()
         wl_transform_for_orientation(Rotation::Deg270, true),
         Transform::Flipped270
     );
+}
+
+#[test]
+fn input_effects_coalesce_scene_flags_without_dropping_transitions()
+{
+    let mut pending = InputEffects::default();
+    assert!(!pending.has_scene_updates());
+
+    pending.merge_scene_flags(InputEffects {
+        handle_visual_changed: true,
+        edit_mode_changed: Some(true),
+        cancel_fade_timer: true,
+        ..InputEffects::default()
+    });
+    assert!(pending.has_scene_updates());
+    assert!(pending.handle_visual_changed);
+    assert_eq!(pending.edit_mode_changed, Some(true));
+    assert!(!pending.cancel_fade_timer);
+
+    pending.merge_scene_flags(InputEffects {
+        layout_changed: true,
+        frame_redraw_needed: true,
+        edit_mode_changed: Some(false),
+        schedule_save: true,
+        ..InputEffects::default()
+    });
+    assert!(pending.layout_changed);
+    assert!(pending.frame_redraw_needed);
+    assert!(pending.handle_visual_changed);
+    assert_eq!(pending.edit_mode_changed, Some(false));
+    assert!(!pending.schedule_save);
 }

@@ -239,13 +239,13 @@ impl OverlayRuntime
         }
     }
 
-    /// Cancels or schedules the `500 ms` debounced config save and `2000 ms` handle fade timer.
-    pub(crate) fn apply_input_effects(&mut self, effects: InputEffects)
+    /// Applies non-scene effects (`quit`, edit logging, timers, pause) and returns whether shutdown started.
+    pub(crate) fn apply_immediate_effects(&mut self, effects: InputEffects) -> bool
     {
         if effects.quit
         {
             self.exit_requested = true;
-            return;
+            return true;
         }
 
         if let Some(editing) = effects.edit_mode_changed
@@ -253,17 +253,29 @@ impl OverlayRuntime
             tracing::debug!(editing, "Toggled edit mode");
         }
 
-        self.sync_scene_for_effects(effects);
         self.sync_timers_for_effects(effects);
 
         if effects.toggle_pause
         {
             self.apply_pause_toggle();
         }
+
+        false
+    }
+
+    /// Applies immediate side effects and synchronizes surfaces, buffers, and corner handle.
+    pub(crate) fn apply_input_effects(&mut self, effects: InputEffects)
+    {
+        if self.apply_immediate_effects(effects)
+        {
+            return;
+        }
+
+        self.sync_scene_for_effects(effects);
     }
 
     /// Synchronizes surface layout, resampled frame buffers, or corner handle opacity after input.
-    fn sync_scene_for_effects(&mut self, effects: InputEffects)
+    pub(crate) fn sync_scene_for_effects(&mut self, effects: InputEffects)
     {
         let needs_redraw = effects.frame_redraw_needed
             || (effects.layout_changed
