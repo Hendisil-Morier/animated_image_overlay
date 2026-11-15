@@ -18,7 +18,7 @@ cargo build --release
 Run the overlay:
 
 ```bash
-./target/release/animated_image_widget FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE] [-r RAM_CACHE_MB] [-e] [-d]
+./target/release/animated_image_widget FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE] [-r RAM_CACHE_MB] [-c ram=<MB>,display=<MB>] [-e] [-d]
 ```
 
 Options:
@@ -28,6 +28,7 @@ Options:
 - `-m`, `--monitor`: Target monitor index or connector name such as `DP-1` (default: `0`).
 - `-s`, `--scale`: Initial display scale, overriding any saved scale for that file.
 - `-r`, `--ram-cache-mb`: RAM limit in MiB for keeping short animations unpacked in memory; larger files read one frame at a time from disk (`0` always reads from disk; default: `128`).
+- `-c`, `--cap`: Comma-separated memory ceilings in MiB accepting `ram=<MB>` and `display=<MB>` in either order (`-c ram=10`, `-c display=32`, `-c ram=10,display=32`; `0` disables that cache; defaults: `ram=128,display=64`).
 - `-e`, `--edit`: Launch directly into interactive edit mode.
 - `-d`, `--debug`: Print debug logs to the terminal alongside the daily log files in `~/.cache/apng-overlay/logs/` (same as setting `OVERLAY_DEBUG=1`).
 
@@ -61,7 +62,7 @@ Signals:
 ## Configuration, Cache, and Logs
 
 - `~/.config/apng-overlay.json`: Stores `x`, `y`, `scale`, `rotation` (degrees in `[0.0, 360.0)`, using zero-copy compositor transforms on exact 90-degree multiples and smooth bilinear CPU resampling at fractional angles), and `flipped` (`true` or `false`) per canonical absolute file path using 500 ms debounced writes guarded by an exclusive `flock` on `~/.config/apng-overlay.json.lock` and atomic temp-file replacement.
-- `~/.cache/apng-overlay/`: Stores `lz4_flex`-compressed premultiplied `ARGB8888` chunks (`.lraw`) and `.json` metadata written strictly after `.lraw`. Frame 0 displays immediately while remaining frames stream in the background. Active cache entries refresh timestamps on hits, entries older than 30 days (`.json`, `.raw`, `.zraw`, `.lraw`) are pruned automatically at startup, and uncompressed frames remain cached in RAM up to a 128 MiB LRU budget.
+- `~/.cache/apng-overlay/`: Stores `lz4_flex`-compressed premultiplied `ARGB8888` chunks (`.lraw`) and `.json` metadata written strictly after `.lraw`. Frame 0 displays immediately while remaining frames stream in the background. Active cache entries refresh timestamps on hits, entries older than 30 days (`.json`, `.raw`, `.zraw`, `.lraw`) are pruned automatically at startup, uncompressed source frames remain cached in RAM up to a `128 MiB` LRU budget (`-r` / `-c ram`), and rotated or downscaled display frames reuse a separate `64 MiB` cache (`-c display`) during steady playback.
 - `~/.cache/apng-overlay/logs/`: Daily rotating log files (`apng-overlay.*.log`, retaining up to 7 files).
 
 ## Structure and Tests
@@ -74,7 +75,7 @@ Rust crate modules under `src/`:
 - `src/layout.rs` & `src/playback.rs`: Pure monitor-clamped geometry calculations and drift/stall-resilient frame clock.
 - `src/decode/`: Streaming APNG, GIF, animated WebP, and static decoding (`codecs.rs`, `pixel.rs`, `stream.rs`).
 - `src/cache/`: Deterministic `.lraw`/`.json` disk storage and 30-day pruning (`disk.rs`), 128 MiB RAM LRU store (`memory.rs`), warm chunk reader (`reader.rs`), decode writer (`sink.rs`), and `FrameCache` facade (`store.rs`).
-- `src/wayland/`: `calloop` event-loop bootstrap (`app.rs`), runtime timer/state coordination (`runtime.rs`), Wayland protocol dispatch (`handlers.rs`), layer-shell/subsurface scene (`scene.rs`), corner handle and dashed border chrome (`chrome.rs`), `SlotPool` frame ring (`shm_ring.rs`), monitor lookup (`monitor.rs`), pointer state (`input.rs`), and triple-click/shortcut mapping (`shortcuts.rs`).
+- `src/wayland/`: `calloop` event-loop bootstrap (`app.rs`), runtime timer/state coordination (`runtime.rs`), Wayland protocol dispatch (`handlers.rs`), layer-shell/subsurface scene (`scene.rs`), display-resolution frame cache (`display_cache.rs`), corner handle and dashed border chrome (`chrome.rs`), `SlotPool` frame ring (`shm_ring.rs`), monitor lookup (`monitor.rs`), pointer state (`input.rs`), and triple-click/shortcut mapping (`shortcuts.rs`).
 
 Run formatting, linting, and Rust integration tests (all under `tests/`):
 
