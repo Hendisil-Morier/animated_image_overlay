@@ -57,7 +57,7 @@ Sibling `<digest>.json` stores `CacheMetadata`:
 }
 ```
 
-- `delays_us` holds per-frame display durations in microseconds clamped to `MIN_FRAME_DELAY_US = 10_000` (`DEFAULT_FRAME_DELAY_US = 33_000` when metadata omits timing).
+- `delays_us` holds per-frame display durations in microseconds cached with a `CACHE_MIN_FRAME_DELAY_US = 1_000` (`1000 fps`) guard (`DEFAULT_FRAME_DELAY_US = 33_000` when metadata omits timing) and clamped at runtime by `PlaybackClock` to the `-f` / `--max-fps` ceiling (`DEFAULT_MAX_FPS = 240`, `MIN_FRAME_DELAY_US = 4_167`).
 - `sizes` lists exact byte lengths of each sequential chunk inside `.lraw`, reconstructed by `build_chunk_spans` (`src/cache/reader.rs`) into `ChunkSpan { offset, len }` for seek-free `FileExt::read_exact_at` (`pread`) reads inside `LrawReader`.
 
 ### Crash Safety, Validation, and Pruning
@@ -109,5 +109,5 @@ Pointer drags, wheel/keyboard scaling, rotation, and flips mark `dirty_save = tr
 ## 4. Event Loop, Playback Clock, and Diagnostics
 
 - **Event Loop (`src/wayland/app.rs`, `src/wayland/runtime.rs`):** `prepare_signals` masks `SIGINT` and `SIGTERM` in `main()` before spawning logging or decoder worker threads so signal delivery hits `calloop::signals::Signals` deterministically. The loop coordinates `WaylandSource`, background decode wakeups (`make_ping`), animation wait timers, `SAVE_DEBOUNCE_MS` (`500 ms`), `HANDLE_FADE_MS` (`2000 ms`), and `FRAME_ERROR_RETRY_MS` (`100 ms`) recovery retries after transient SHM/cache staging failures.
-- **Playback Clock (`src/playback.rs`):** `PlaybackClock` maintains monotonic microsecond deadlines (`next_deadline_us`), holds on the final buffered frame while `!decode_done`, stops Wayland callbacks on static or paused images, and rebases stale deadlines if elapsed drift exceeds `STALL_RECOVERY_US = 1_000_000.0` (e.g. after system suspend) instead of spinning catch-up frames.
+- **Playback Clock (`src/playback.rs`):** `PlaybackClock` maintains monotonic microsecond deadlines (`next_deadline_us`) clamped to the configurable `--max-fps` ceiling (`DEFAULT_MAX_FPS = 240`, `4_167 us`), holds on the final buffered frame while `!decode_done`, stops Wayland callbacks on static or paused images, and rebases stale deadlines if elapsed drift exceeds `STALL_RECOVERY_US = 1_000_000.0` (e.g. after system suspend) instead of spinning catch-up frames.
 - **Dual-Output Diagnostics (`src/logging.rs`):** `build_subscriber_in_dir` writes `DEBUG`-level records through a non-blocking `RollingFileAppender` (`Rotation::DAILY`, `apng-overlay.*.log`, `max_log_files(7)`) under `$XDG_CACHE_HOME/apng-overlay/logs/`, mirrors `DEBUG` output to stdout when `--debug` or truthy `OVERLAY_DEBUG` is active, and flushes pending buffers both in `main()` shutdown (`LoggingGuard::flush`) and in a chained panic hook (`install_panic_flush_hook`).

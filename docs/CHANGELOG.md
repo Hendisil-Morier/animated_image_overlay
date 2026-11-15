@@ -4,7 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- Added `-f` / `--max-fps` CLI flag (`CliArgs::max_fps`, `1..=1000`, default `240` fps) and `PlaybackClock::with_max_fps` to configure the playback frame rate ceiling.
+
 ### Changed
+- Lowered the default playback delay floor from `10_000 us` (`100 fps`) to `4_167 us` (`240 fps`) with a `1_000 us` (`CACHE_MIN_FRAME_DELAY_US`) decoded `.json` cache floor so `120 fps`, `144 fps`, and `240 fps` animations play natively while preserving `0 ms` quirk protection.
 - Upgraded frame timing, `.json` cache metadata (`delays_us`), `PlaybackClock`, and `calloop` frame wait timers from millisecond to microsecond precision (`16_667 us` for `1/60`s APNG/WebP frames).
 - Coalesced scene and pointer cursor synchronization once per `wl_pointer.frame` batch (`PointerHandler::pointer_frame`, `InputEffects::merge_scene_flags`, `OverlayRuntime::apply_immediate_effects`), skipped redundant `WlRegion` input-region updates when `input_rect` is unchanged, switched corner handle and edit outline subsurfaces to synchronized commits with cached placement/appearance diffing (`OverlayChrome::hide_outline`, `OutlineEdge::apply_placement`), and committed `parent_layer` before `image_surface` in `OverlayScene::sync_layout_inner`.
 
