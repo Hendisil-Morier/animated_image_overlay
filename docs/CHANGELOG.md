@@ -5,6 +5,7 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Added [ARCHITECTURE.md](ARCHITECTURE.md) documenting the Wayland layer-shell/subsurface scene, headerless `v2-lraw-argb8888` `.lraw`/`.json` cache format, `apng-overlay.json` schema/concurrency lock, and `calloop`/logging lifecycle.
 - Added `-c` / `--cap` CLI option (`ram=<MB>` and `display=<MB>` suboptions, accepted individually or comma-separated) and `DisplayFrameCache` (`src/wayland/display_cache.rs`, default `64 MiB`) to eliminate steady-state LZ4 decompression and resampling CPU overhead when display frames fit budget.
 - Added edit-mode `[` and `]` repeatable shortcuts (`+/-5` degrees) and `0` reset shortcut (`KeyShortcut::Rotate`, `KeyShortcut::ResetRotation`) alongside bilinear premultiplied `ARGB8888` CPU rotation with a `1 px` transparent apron (`decode::rotate_argb8888_into`) and dynamic `ImageBufferRing` resizing for arbitrary angles.
 - Added edit-mode `f` and `F` keyboard shortcuts (`FlipAxis`, `KeyShortcut::Flip`, and `Transform::Flipped*` via `wl_surface::set_buffer_transform`) to mirror the overlay horizontally or vertically using dihedral composition with `rotation`, persisted per image via `flipped` inside `apng-overlay.json`.
@@ -15,8 +16,10 @@ All notable changes to this project are documented here.
 - Partitioned fractional rotation (`decode::rotate_argb8888_into`) per scanline using `linear_in_bounds` into unchecked interior spans (`write_interior_pixel_swar` with `12`-bit bilinear weights packed as dual `[B, R]` / `[G, A]` `u64` SWAR lanes) and `1 px` transparent apron tails (`write_apron_pixel`).
 - Cached display-resolution rotated and downscaled quarter-turn buffers lazily inside `DisplayFrameCache` (`-c display`, `64 MiB` default, normalized via `angle_key`), pairing canonical `(angle=0.0, flipped=false)` keys on oversized quarter turns (`!fits_source_ram`) with `wl_surface::set_buffer_transform` so all eight dihedral quarter-flip orientations share cached Lanczos3 downscales while oversized overlays (`!would_fit`) fall back to `.lraw` streaming (see [ADR-001](decisions/001-display-cache-and-resampling.md)).
 - Deferred SHM ring resizes during pointer resize drags until button release (`InputState::is_resizing`) while resyncing physical buffer density on compositor scale changes and shrinking hysteresis (`want_pixels * 3 <= cur_pixels * 2`) via `OverlayScene::needs_buffer_resync`.
+- Aligned [CODING_STYLE.md](CODING_STYLE.md) with `Cargo.toml` lints (`unsafe_code = "forbid"`, `missing_docs = "warn"`), `src/lib.rs` / `src/main.rs` unwrap denials, and daily rotating logging, and removed outdated hardcoded `128 MiB` / magic-header doc comments from `src/lib.rs`, `src/cache/`, and `src/wayland/runtime.rs`.
 
 ### Fixed
+- Corrected [README.md](../README.md) and `--help` documentation (`12 px` nudge distance, zoom key variants `_`/`=`/numpad, consistent corner-handle middle-click wording, `-c ram` overriding `-r`, deduplicated `OVERLAY_DEBUG`, and `XDG_CONFIG_HOME` / `XDG_CACHE_HOME` overrides).
 - Separated alpha-premultiplication handling inside `decode::pixel::resize_u8x4` so `resize_premultiplied_argb8888` passes `ResizeOptions::use_alpha(false)` on premultiplied `ARGB8888` cache frames while `downscale_if_needed` retains `use_alpha(true)` for straight RGBA decode input, fixing double premultiplication on semi-transparent edges and dropping `Resizer::alpha_buffer` (`12.25 MB` steady `Pss_Anon` savings on `M_Animation.apng`).
 
 ### Benchmark Comparison (`~/Pictures/M_Animation.apng -w 5000`, `1492x2158`, `180` frames, KDE KWin `eDP-1` `2x`)
