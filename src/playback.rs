@@ -1,18 +1,31 @@
 //! Deterministic animation frame timing and suspend/stall recovery state machine.
 //!
 //! Mirrors Python `_on_tick` cadence rules at microsecond resolution: clamps delays to
-//! a 10 ms (`10_000 us`) floor, holds on the final buffered frame while background
-//! decoding is incomplete, loops cleanly once decoding finishes, and resets stale
+//! a configurable `--max-fps` floor (`240 fps` / `4_167 us` by default, with a `1_000 us`
+//! decoded cache floor for `0 ms` GIF/WebP quirks), holds on the final buffered frame while
+//! background decoding is incomplete, loops cleanly once decoding finishes, and resets stale
 //! deadlines after pauses or suspend jumps exceeding 1000 ms.
 
 /// Microseconds per millisecond conversion constant.
 const MICROS_PER_MILLI: u32 = 1_000;
 
-/// Minimum allowed display duration per animation frame in milliseconds.
-pub const MIN_FRAME_DELAY_MS: u32 = 10;
+/// Microseconds per second conversion constant.
+const MICROS_PER_SECOND: u32 = 1_000_000;
 
-/// Minimum allowed display duration per animation frame in microseconds (`10 ms`).
-pub const MIN_FRAME_DELAY_US: u32 = MIN_FRAME_DELAY_MS * MICROS_PER_MILLI;
+/// Default maximum playback frame rate ceiling in frames per second when `--max-fps` is omitted.
+pub const DEFAULT_MAX_FPS: u32 = 240;
+
+/// Maximum configurable `--max-fps` ceiling matching the `1_000 us` cache storage floor.
+pub const MAX_CONFIGURABLE_FPS: u32 = 1_000;
+
+/// Minimum allowed display duration cached per frame in microseconds (`1_000 us` / `1000 fps`).
+pub const CACHE_MIN_FRAME_DELAY_US: u32 = MICROS_PER_SECOND / MAX_CONFIGURABLE_FPS;
+
+/// Default minimum allowed display duration per animation frame in milliseconds (`4 ms`).
+pub const MIN_FRAME_DELAY_MS: u32 = 4;
+
+/// Default minimum allowed display duration per animation frame in microseconds (`4_167 us` / `240 fps`).
+pub const MIN_FRAME_DELAY_US: u32 = PlaybackClock::max_fps_to_delay_us(DEFAULT_MAX_FPS);
 
 /// Fallback frame delay in milliseconds when source metadata omits timing information.
 pub const DEFAULT_FRAME_DELAY_MS: u32 = 33;
@@ -50,13 +63,16 @@ pub struct PlaybackClock
     // Monotonic timestamp (us) when the next frame transition becomes due.
     next_deadline_us: Option<f64>,
 
+    // Minimum frame duration in microseconds enforced during playback (`--max-fps` ceiling).
+    min_delay_us: u32,
+
     // When true, advances pause until resumed by keyboard Space in edit mode.
     paused: bool,
 }
 
 impl Default for PlaybackClock
 {
-    /// Starts at frame 0 with an uninitialized deadline and active playback.
+    /// Starts at frame 0 with an uninitialized deadline, active playback, and `DEFAULT_MAX_FPS` cap.
     fn default() -> Self
     {
         Self::new()
@@ -65,23 +81,53 @@ impl Default for PlaybackClock
 
 impl PlaybackClock
 {
-    /// Constructs a new playback clock starting at frame index 0.
+    /// Constructs a new playback clock starting at frame index 0 with the default `240 fps` cap.
     pub fn new() -> Self
+    {
+        Self::with_max_fps(DEFAULT_MAX_FPS)
+    }
+
+    /// Constructs a new playback clock starting at frame index 0 capped to `max_fps`.
+    pub fn with_max_fps(max_fps: u32) -> Self
     {
         Self {
             index: 0,
             next_deadline_us: None,
+            min_delay_us: Self::max_fps_to_delay_us(max_fps),
             paused: false,
         }
     }
 
-    /// Clamps a decoded microsecond delay to the `10_000 us` (`10 ms`) minimum floor.
+    /// Returns the configured minimum per-frame display duration in microseconds.
+    pub fn min_delay_us(&self) -> u32
+    {
+        self.min_delay_us
+    }
+
+    /// Converts a frame rate limit in FPS to the nearest microsecond minimum frame delay.
+    pub const fn max_fps_to_delay_us(max_fps: u32) -> u32
+    {
+        if max_fps == 0
+        {
+            return DEFAULT_FRAME_DELAY_US;
+        }
+        let rounded = MICROS_PER_SECOND.saturating_add(max_fps / 2) / max_fps;
+        if rounded < 1 { 1 } else { rounded }
+    }
+
+    /// Clamps a decoded microsecond delay to the `MIN_FRAME_DELAY_US` (`4_167 us`, `240 fps`) floor.
     pub fn normalize_delay_us(delay_us: Option<f64>) -> u32
     {
         clamp_rounded_delay(delay_us, DEFAULT_FRAME_DELAY_US, MIN_FRAME_DELAY_US)
     }
 
-    /// Clamps a decoded delay to the 10 ms minimum floor (mapping 0 ms GIF/WebP quirks safely).
+    /// Clamps a decoded microsecond delay to the `1_000 us` (`1000 fps`) cache storage guard.
+    pub fn normalize_cache_delay_us(delay_us: Option<f64>) -> u32
+    {
+        clamp_rounded_delay(delay_us, DEFAULT_FRAME_DELAY_US, CACHE_MIN_FRAME_DELAY_US)
+    }
+
+    /// Clamps a decoded delay to the `MIN_FRAME_DELAY_MS` (`4 ms`) floor.
     pub fn normalize_delay_ms(delay_ms: Option<f64>) -> u32
     {
         clamp_rounded_delay(delay_ms, DEFAULT_FRAME_DELAY_MS, MIN_FRAME_DELAY_MS)
@@ -116,8 +162,9 @@ impl PlaybackClock
     /// Advances playback against monotonic `now_us`, available `delays_us`, and `decode_done`.
     pub fn advance_us(&mut self, now_us: f64, delays_us: &[u32], decode_done: bool) -> TickOutcome
     {
+        let min_delay_us = self.min_delay_us;
         self.advance_with_unit(now_us, delays_us.len(), decode_done, |idx| {
-            f64::from(delays_us[idx].max(MIN_FRAME_DELAY_US))
+            f64::from(delays_us[idx].max(min_delay_us))
         })
     }
 
@@ -125,8 +172,9 @@ impl PlaybackClock
     pub fn advance(&mut self, now_ms: f64, delays_ms: &[u32], decode_done: bool) -> TickOutcome
     {
         let scale = f64::from(MICROS_PER_MILLI);
+        let min_delay_us = f64::from(self.min_delay_us);
         self.advance_with_unit(now_ms * scale, delays_ms.len(), decode_done, |idx| {
-            f64::from(delays_ms[idx].max(MIN_FRAME_DELAY_MS)) * scale
+            (f64::from(delays_ms[idx]) * scale).max(min_delay_us)
         })
     }
 

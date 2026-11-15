@@ -59,7 +59,7 @@ pub struct CacheMetadata
     /// Stored frame height in pixels.
     pub h: u32,
 
-    /// Per-frame display durations in microseconds (`>= 10_000 us`).
+    /// Per-frame display durations in microseconds (`>= 1_000 us` storage floor).
     pub delays_us: Vec<u32>,
 
     /// Per-frame compressed byte lengths sequential inside `.lraw`.

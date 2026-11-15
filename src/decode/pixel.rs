@@ -31,10 +31,10 @@ pub struct DecodedFirstFrame
     /// Stored frame height in pixels proportional to stored width.
     pub height: u32,
 
-    /// Display delay in milliseconds rounded from `delay_us` (clamped to `>= 10 ms`).
+    /// Display delay in milliseconds rounded from `delay_us` (clamped at cache floor `>= 1 ms`).
     pub delay_ms: u32,
 
-    /// Display delay in microseconds (clamped to `>= 10_000 us`).
+    /// Display delay in microseconds (clamped to `>= 1_000 us` cache floor; playback clamps to `--max-fps`).
     pub delay_us: u32,
 
     /// Uncompressed premultiplied Wayland `ARGB8888` pixel buffer.
@@ -48,10 +48,10 @@ pub struct DecodedFirstFrame
 #[derive(Debug, Clone)]
 pub struct EncodedFrame
 {
-    /// Display delay in milliseconds rounded from `delay_us` (clamped to `>= 10 ms`).
+    /// Display delay in milliseconds rounded from `delay_us` (clamped at cache floor `>= 1 ms`).
     pub delay_ms: u32,
 
-    /// Display delay in microseconds (clamped to `>= 10_000 us`).
+    /// Display delay in microseconds (clamped to `>= 1_000 us` cache floor; playback clamps to `--max-fps`).
     pub delay_us: u32,
 
     /// LZ4-compressed premultiplied `ARGB8888` pixel chunk.
@@ -67,7 +67,7 @@ pub(crate) struct RawRgbaFrame
     /// Source pixel height prior to aspect-preserving downscale.
     pub(crate) height: u32,
 
-    /// Normalized microsecond display duration (`>= 10_000 us`).
+    /// Normalized microsecond display duration (`>= 1_000 us` cache floor).
     pub(crate) delay_us: u32,
 
     /// Interleaved straight `[R, G, B, A]` pixels.

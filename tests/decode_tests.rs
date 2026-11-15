@@ -729,17 +729,15 @@ fn resize_premultiplied_argb8888_downscales_and_preserves_identity()
     assert!(resize_premultiplied_argb8888(&solid[..16], 20, 10, 10, 5, &mut resizer).is_err());
 }
 
-#[test]
-fn decode_preserves_60fps_apng_microsecond_delays()
+fn assert_apng_fraction_delay_us(
+    dir: &Path,
+    name: &str,
+    frames: &[([u8; 4], u16, u16)],
+    expected_us: u32,
+) -> DecodedFirstFrame
 {
-    let temp = TempDecodeDir::new("apng_60fps");
-    let apng_path = temp.path().join("sixty_fps.apng");
-    let apng_bytes = build_synthetic_apng_2x2_fraction(&[
-        ([255, 0, 0, 255], 1, 60),
-        ([0, 255, 0, 255], 1, 60),
-        ([0, 0, 255, 255], 1, 60),
-    ]);
-    fs::write(&apng_path, apng_bytes).unwrap();
+    let apng_path = dir.join(name);
+    fs::write(&apng_path, build_synthetic_apng_2x2_fraction(frames)).unwrap();
 
     let rec_state = Arc::new(Mutex::new(RecordedStream::default()));
     let (first, worker) = FrameDecoder::open_stream(
@@ -751,16 +749,51 @@ fn decode_preserves_60fps_apng_microsecond_delays()
             state: Arc::clone(&rec_state),
         }),
     )
-    .expect("60fps APNG should stream");
+    .expect("APNG should stream");
     if let Some(handle) = worker
     {
         handle.join().unwrap();
     }
 
-    assert_eq!(first.delay_us, 16_667);
-    assert_eq!(first.delay_ms, 17);
+    assert_eq!(first.delay_us, expected_us);
     let rec = rec_state.lock().unwrap();
     assert!(rec.finished);
     assert!(rec.finish_err.is_none());
-    assert_eq!(rec.delays_us, vec![16_667, 16_667, 16_667]);
+    assert_eq!(rec.delays_us, vec![expected_us; frames.len()]);
+    first
+}
+
+#[test]
+fn decode_preserves_60fps_apng_microsecond_delays()
+{
+    let temp = TempDecodeDir::new("apng_60fps");
+    let first = assert_apng_fraction_delay_us(
+        temp.path(),
+        "sixty_fps.apng",
+        &[
+            ([255, 0, 0, 255], 1, 60),
+            ([0, 255, 0, 255], 1, 60),
+            ([0, 0, 255, 255], 1, 60),
+        ],
+        16_667,
+    );
+    assert_eq!(first.delay_ms, 17);
+}
+
+#[test]
+fn decode_preserves_120fps_and_240fps_apng_microsecond_delays()
+{
+    let temp = TempDecodeDir::new("apng_high_fps");
+    for (name, num, den, expected_us) in [
+        ("fps120.apng", 1_u16, 120_u16, 8_333_u32),
+        ("fps240.apng", 1_u16, 240_u16, 4_167_u32),
+    ]
+    {
+        let _ = assert_apng_fraction_delay_us(
+            temp.path(),
+            name,
+            &[([255, 0, 0, 255], num, den), ([0, 255, 0, 255], num, den)],
+            expected_us,
+        );
+    }
 }

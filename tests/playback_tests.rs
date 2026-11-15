@@ -1,7 +1,8 @@
 //! Integration tests for animation playback scheduling, hold-on-stream, wrap, and stall recovery.
 
 use animated_image_widget::playback::{
-    DEFAULT_FRAME_DELAY_US, MIN_FRAME_DELAY_MS, MIN_FRAME_DELAY_US, PlaybackClock, TickOutcome,
+    CACHE_MIN_FRAME_DELAY_US, DEFAULT_FRAME_DELAY_US, DEFAULT_MAX_FPS, MIN_FRAME_DELAY_MS,
+    MIN_FRAME_DELAY_US, PlaybackClock, TickOutcome,
 };
 
 #[test]
@@ -48,27 +49,41 @@ fn playback_holds_while_streaming_wraps_on_completion_and_recovers_from_stall()
 #[test]
 fn playback_enforces_minimum_delay_and_pause_resume()
 {
+    assert_eq!(MIN_FRAME_DELAY_MS, 4);
+    assert_eq!(MIN_FRAME_DELAY_US, 4_167);
     assert_eq!(
         PlaybackClock::normalize_delay_ms(Some(0.0)),
         MIN_FRAME_DELAY_MS
     );
     assert_eq!(PlaybackClock::normalize_delay_ms(None), 33);
 
-    let mut clock = PlaybackClock::new();
+    let mut default_clock = PlaybackClock::new();
     let delays = [0, 0];
-
-    assert_eq!(clock.advance(10.0, &delays, true), TickOutcome::NoChange);
-    assert_eq!(clock.next_deadline_ms(), Some(20.0));
-
-    assert!(clock.toggle_pause());
     assert_eq!(
-        clock.advance(100.0, &delays, true),
+        default_clock.advance(10.0, &delays, true),
+        TickOutcome::NoChange
+    );
+    assert_eq!(default_clock.next_deadline_ms(), Some(14.167));
+
+    let mut capped_100 = PlaybackClock::with_max_fps(100);
+    assert_eq!(
+        capped_100.advance(10.0, &delays, true),
+        TickOutcome::NoChange
+    );
+    assert_eq!(capped_100.next_deadline_ms(), Some(20.0));
+
+    assert!(capped_100.toggle_pause());
+    assert_eq!(
+        capped_100.advance(100.0, &delays, true),
         TickOutcome::StopCallbacks
     );
 
-    assert!(!clock.toggle_pause());
-    assert_eq!(clock.advance(100.0, &delays, true), TickOutcome::NoChange);
-    assert_eq!(clock.next_deadline_ms(), Some(110.0));
+    assert!(!capped_100.toggle_pause());
+    assert_eq!(
+        capped_100.advance(100.0, &delays, true),
+        TickOutcome::NoChange
+    );
+    assert_eq!(capped_100.next_deadline_ms(), Some(110.0));
 }
 
 #[test]
@@ -125,4 +140,59 @@ fn playback_preserves_60fps_microsecond_deadlines_and_wait_times()
         TickOutcome::FrameChanged(2)
     );
     assert_eq!(clock.next_deadline_us(), Some(50_001.0));
+}
+
+#[test]
+fn playback_respects_default_240fps_and_custom_max_fps_ceilings()
+{
+    assert_eq!(DEFAULT_MAX_FPS, 240);
+    assert_eq!(PlaybackClock::default().min_delay_us(), MIN_FRAME_DELAY_US);
+    assert_eq!(PlaybackClock::max_fps_to_delay_us(240), 4_167);
+    assert_eq!(PlaybackClock::max_fps_to_delay_us(144), 6_944);
+    assert_eq!(PlaybackClock::max_fps_to_delay_us(120), 8_333);
+    assert_eq!(PlaybackClock::max_fps_to_delay_us(100), 10_000);
+    assert_eq!(PlaybackClock::max_fps_to_delay_us(60), 16_667);
+
+    assert_eq!(
+        PlaybackClock::normalize_delay_us(Some(0.0)),
+        MIN_FRAME_DELAY_US
+    );
+    assert_eq!(
+        PlaybackClock::normalize_cache_delay_us(Some(0.0)),
+        CACHE_MIN_FRAME_DELAY_US
+    );
+    assert_eq!(
+        PlaybackClock::normalize_cache_delay_us(Some(2_777.8)),
+        2_778
+    );
+
+    // Default 240 fps cap allows 120 fps (`8_333 us`) and 240 fps (`4_167 us`) natively.
+    let mut clock_default = PlaybackClock::new();
+    let delays_120 = [8_333, 8_333, 8_333];
+    assert_eq!(
+        clock_default.advance_us(0.0, &delays_120, true),
+        TickOutcome::NoChange
+    );
+    assert_eq!(clock_default.next_deadline_us(), Some(8_333.0));
+    assert_eq!(
+        clock_default.advance_us(8_333.0, &delays_120, true),
+        TickOutcome::FrameChanged(1)
+    );
+    assert_eq!(clock_default.next_deadline_us(), Some(16_666.0));
+
+    // `-f 60` slows a 120 fps animation down to 60 fps (`16_667 us`), while keeping 30 fps untouched.
+    let mut clock_60 = PlaybackClock::with_max_fps(60);
+    assert_eq!(
+        clock_60.advance_us(0.0, &delays_120, true),
+        TickOutcome::NoChange
+    );
+    assert_eq!(clock_60.next_deadline_us(), Some(16_667.0));
+
+    // `-f 360` enables sub-240 fps delays (`2_778 us`) while clamping `1_000 us` (0 ms quirk) up to `2_778 us`.
+    let mut clock_360 = PlaybackClock::with_max_fps(360);
+    assert_eq!(
+        clock_360.advance_us(0.0, &[1_000, 2_778], true),
+        TickOutcome::NoChange
+    );
+    assert_eq!(clock_360.next_deadline_us(), Some(2_778.0));
 }

@@ -56,6 +56,7 @@ fn main() -> ExitCode
         base_width = cli.base_width,
         monitor = %cli.monitor,
         scale = ?cli.scale,
+        max_fps = cli.max_fps,
         ram_cache_mb = cli.ram_cache_mb,
         debug = cli.debug,
         "Starting Wayland animated image overlay"

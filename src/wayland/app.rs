@@ -126,7 +126,7 @@ pub fn run_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayE
         scene: None,
         layout: OverlayLayout::new(frame_w, frame_h, 1920, 1080, startup.initial_state),
         input: InputState::with_editing(cli.edit),
-        playback: PlaybackClock::new(),
+        playback: PlaybackClock::with_max_fps(cli.max_fps),
         start_instant: Instant::now(),
         configured: false,
         frame_callback_pending: false,

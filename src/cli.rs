@@ -2,7 +2,8 @@
 //!
 //! Preserves exact CLI parity with the Python launcher (`FILE`, `-n`/`--max-frames`,
 //! `-w`/`--base-width`, `-m`/`--monitor`, `-s`/`--scale`, `-r`/`--ram-cache-mb`, `-c`/`--cap`,
-//! `-e`/`--edit`, and `-d`/`--debug`) while rejecting invalid numeric inputs and missing files.
+//! `-f`/`--max-fps`, `-e`/`--edit`, and `-d`/`--debug`) while rejecting invalid numeric inputs
+//! and missing files.
 
 // Standard path and OS argument string types.
 use std::{ffi::OsString, path::PathBuf};
@@ -10,8 +11,12 @@ use std::{ffi::OsString, path::PathBuf};
 // Clap derive macros and error classification for structured CLI parsing.
 use clap::{ArgAction, Parser, error::ErrorKind};
 
-// Default uncompressed RAM cache budget constant and validation error type.
-use crate::{cache::DEFAULT_RAM_CACHE_BUDGET_BYTES, error::OverlayError};
+// Default uncompressed RAM cache budget, default/max FPS bounds, and validation error type.
+use crate::{
+    cache::DEFAULT_RAM_CACHE_BUDGET_BYTES,
+    error::OverlayError,
+    playback::{DEFAULT_MAX_FPS, MAX_CONFIGURABLE_FPS},
+};
 
 // Default stored cache/display width in logical pixels when `--base-width` is omitted.
 const DEFAULT_BASE_WIDTH: u32 = 500;
@@ -126,6 +131,16 @@ pub struct CliArgs
     /// Resolved RAM limit in MiB for display-resolution frame caching (`0` disables, default: `64`).
     #[arg(skip = DEFAULT_DISPLAY_CACHE_MB)]
     pub display_cache_mb: usize,
+
+    /// Maximum playback frame rate ceiling in FPS (`1..=1000`, default: `240`).
+    #[arg(
+        short = 'f',
+        long = "max-fps",
+        value_name = "FPS",
+        default_value_t = DEFAULT_MAX_FPS,
+        help = "Maximum playback frame rate in FPS (1..=1000, default: 240)."
+    )]
+    pub max_fps: u32,
 
     /// Start directly in interactive edit mode with borders and keyboard focus enabled.
     #[arg(
@@ -245,13 +260,20 @@ impl CliArgs
         Self::mb_to_bytes(self.display_cache_mb, "--cap display")
     }
 
-    /// Verifies numeric constraints (`base_width >= 1`, finite positive `scale`, valid cache caps, monitor).
+    /// Verifies numeric constraints (`base_width >= 1`, `max_fps` in `1..=1000`, finite positive `scale`, valid cache caps, monitor).
     pub fn validate_numbers(&self) -> Result<(), OverlayError>
     {
         if self.base_width < 1
         {
             return Err(OverlayError::CliValidation(String::from(
                 "--base-width must be >= 1",
+            )));
+        }
+
+        if !(1..=MAX_CONFIGURABLE_FPS).contains(&self.max_fps)
+        {
+            return Err(OverlayError::CliValidation(format!(
+                "--max-fps must be between 1 and {MAX_CONFIGURABLE_FPS}"
             )));
         }
 

@@ -17,7 +17,7 @@ use super::{
     memory::{ChunkSpan, SharedFrames},
     store::FrameCache,
 };
-use crate::{decode::checked_argb_byte_len, error::CacheError, playback::MIN_FRAME_DELAY_US};
+use crate::{decode::checked_argb_byte_len, error::CacheError, playback::CACHE_MIN_FRAME_DELAY_US};
 
 /// Random-access `.lraw` chunk reader reusing a single compressed byte buffer across frames.
 pub(crate) struct LrawReader
@@ -212,7 +212,7 @@ pub(crate) fn try_open_cached_store(
     let delays_us: Vec<u32> = meta
         .delays_us
         .iter()
-        .map(|&delay| delay.max(MIN_FRAME_DELAY_US))
+        .map(|&delay| delay.max(CACHE_MIN_FRAME_DELAY_US))
         .collect();
     let shared = SharedFrames::with_warm_disk(
         meta.w,
