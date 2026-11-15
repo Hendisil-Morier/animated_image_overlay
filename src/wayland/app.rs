@@ -84,6 +84,7 @@ pub fn run_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayE
     });
 
     let ram_budget_bytes = cli.ram_cache_bytes()?;
+    let display_budget_bytes = cli.display_cache_bytes()?;
     let cache = FrameCache::open_with_ram_budget(
         &cli.file,
         cli.base_width,
@@ -174,6 +175,7 @@ pub fn run_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayE
         target_desc,
         frame_w,
         frame_h,
+        display_budget_bytes,
     )?;
     runtime.scene = Some(scene);
 

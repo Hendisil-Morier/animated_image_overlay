@@ -9,6 +9,9 @@ pub mod app;
 // Corner handle (`28x28` rounded pill) and edit-mode dashed outline subsurfaces.
 pub mod chrome;
 
+// Bounded in-memory display-resolution `ARGB8888` frame cache.
+pub mod display_cache;
+
 // SCTK and raw Wayland protocol dispatch implementations for `OverlayRuntime`.
 pub mod handlers;
 

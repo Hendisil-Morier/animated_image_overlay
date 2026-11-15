@@ -189,7 +189,7 @@ impl OverlayRuntime
         }
     }
 
-    /// Fetches frame `idx` outside cache locks, uploads it to SHM, and requests a frame callback.
+    /// Fetches frame `idx` from display cache or `FrameCache`, uploads it to SHM, and requests callback.
     fn present_frame_at(&mut self, idx: usize)
     {
         let Some(scene) = &mut self.scene
@@ -198,10 +198,7 @@ impl OverlayRuntime
             return;
         };
 
-        let staged = self
-            .cache
-            .with_frame_argb(idx, |argb| scene.stage_frame(&self.shm, &self.layout, argb))
-            .and_then(|inner| inner);
+        let staged = scene.stage_frame_cached(&self.shm, &self.layout, &self.cache, idx);
 
         match staged
         {
@@ -224,18 +221,14 @@ impl OverlayRuntime
         };
 
         let frame_idx = self.playback.current_index();
-        let refreshed = self
-            .cache
-            .with_frame_argb(frame_idx, |argb| {
-                scene.refresh_oriented_frame(
-                    &self.compositor,
-                    &self.shm,
-                    &self.layout,
-                    &self.input,
-                    argb,
-                )
-            })
-            .and_then(|inner| inner);
+        let refreshed = scene.refresh_frame_cached(
+            &self.compositor,
+            &self.shm,
+            &self.layout,
+            &self.input,
+            &self.cache,
+            frame_idx,
+        );
         if let Err(err) = refreshed
         {
             tracing::warn!(

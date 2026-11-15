@@ -29,15 +29,17 @@ use wayland_protocols::wp::viewporter::client::{
     wp_viewport::WpViewport, wp_viewporter::WpViewporter,
 };
 
-// Chrome subsurfaces, SHM frame ring, monitor metadata, layout, input state, and errors.
+// Chrome subsurfaces, display cache, SHM frame ring, monitor metadata, layout, and input state.
 use super::{
     chrome::OverlayChrome,
+    display_cache::{DisplayCacheKey, DisplayFrameCache, angle_key},
     input::InputState,
     monitor::MonitorDescriptor,
     shm_ring::{ImageBufferRing, create_argb_buffer, shm_pool_err},
 };
 use crate::{
-    decode::rotate_argb8888_into,
+    cache::FrameCache,
+    decode::{checked_argb_byte_len, rotate_argb8888_into},
     error::{OverlayError, WaylandError},
     layout::{OverlayLayout, Rotation},
 };
@@ -108,6 +110,9 @@ pub(crate) struct OverlayScene
     // Reusable frame ring backing `image_surface` at source or scaled rotated bounds.
     frame_ring: ImageBufferRing,
 
+    // Budgeted RAM cache of display-resolution frames avoiding repeated LZ4 and rotation work.
+    display_cache: DisplayFrameCache,
+
     // Corner handle and edit-mode dashed border subsurfaces.
     chrome: OverlayChrome,
 
@@ -142,6 +147,7 @@ impl OverlayScene
         monitor: &MonitorDescriptor,
         frame_width: u32,
         frame_height: u32,
+        display_cache_budget_bytes: usize,
     ) -> Result<Self, OverlayError>
     where
         D: Dispatch<ZwlrLayerSurfaceV1, LayerSurfaceData>
@@ -203,6 +209,7 @@ impl OverlayScene
             parent_transparent_buf,
             _parent_pool: parent_pool,
             frame_ring,
+            display_cache: DisplayFrameCache::new(display_cache_budget_bytes),
             chrome,
             screen_width: sw,
             screen_height: sh,
@@ -270,18 +277,72 @@ impl OverlayScene
         Ok(())
     }
 
-    /// Uploads and attaches a new animation frame onto the desynchronized image subsurface.
+    /// Uploads and attaches animation frame `frame_idx`, reusing `display_cache` when within budget.
     ///
     /// Returns any retired `ImageBufferRing` so callers keep the old SHM pool alive until after
     /// committing `image_surface`.
-    pub(crate) fn stage_frame(
+    pub(crate) fn stage_frame_cached(
         &mut self,
         shm: &Shm,
         layout: &OverlayLayout,
-        frame_argb: &[u8],
+        cache: &FrameCache,
+        frame_idx: usize,
     ) -> Result<Option<ImageBufferRing>, OverlayError>
     {
-        self.stage_oriented_buffer(shm, layout, frame_argb)
+        let (target_w, target_h) = self.oriented_target_size(layout);
+        if layout.quarter_turn().is_none()
+        {
+            let (frame_count, decode_done, _) = cache.cache_profile();
+            let key = DisplayCacheKey {
+                width: target_w,
+                height: target_h,
+                angle_bits: angle_key(layout.rotation()),
+                flipped: layout.flipped(),
+            };
+            if self.display_cache.sync(key, frame_count, decode_done)
+            {
+                if let Some(hit) = self.display_cache.get(frame_idx)
+                {
+                    return with_target_ring(
+                        &mut self.frame_ring,
+                        shm,
+                        target_w,
+                        target_h,
+                        |ring| ring.upload_and_attach(&self.image_surface, hit),
+                    );
+                }
+
+                let (frame_w, frame_h) = layout.frame_size();
+                let mut buf = vec![0_u8; checked_argb_byte_len(target_w, target_h)?];
+                cache.with_frame_argb(frame_idx, |argb| {
+                    rotate_argb8888_into(
+                        argb,
+                        frame_w,
+                        frame_h,
+                        layout.rotation(),
+                        layout.flipped(),
+                        target_w,
+                        target_h,
+                        &mut buf,
+                    )
+                })??;
+                let retired =
+                    with_target_ring(&mut self.frame_ring, shm, target_w, target_h, |ring| {
+                        ring.upload_and_attach(&self.image_surface, &buf)
+                    })?;
+                self.display_cache.store(frame_idx, buf);
+                return Ok(retired);
+            }
+        }
+
+        self.display_cache.clear();
+        cache
+            .with_frame_argb(frame_idx, |argb| {
+                with_target_ring(&mut self.frame_ring, shm, target_w, target_h, |ring| {
+                    fill_ring_slot(ring, &self.image_surface, layout, argb)
+                })
+            })
+            .and_then(|inner| inner)
     }
 
     /// Returns the desired SHM ring dimensions for `layout`, matching unrotated cache frames on
@@ -322,17 +383,18 @@ impl OverlayScene
         want_pixels * 3 <= cur_pixels * 2
     }
 
-    /// Re-uploads `frame_argb` for `layout` orientation and atomically commits buffer + layout changes.
-    pub(crate) fn refresh_oriented_frame(
+    /// Re-uploads `frame_idx` for `layout` orientation and atomically commits buffer + layout changes.
+    pub(crate) fn refresh_frame_cached(
         &mut self,
         compositor: &CompositorState,
         shm: &Shm,
         layout: &OverlayLayout,
         input: &InputState,
-        frame_argb: &[u8],
+        cache: &FrameCache,
+        frame_idx: usize,
     ) -> Result<(), OverlayError>
     {
-        let _retired_ring = self.stage_oriented_buffer(shm, layout, frame_argb)?;
+        let _retired_ring = self.stage_frame_cached(shm, layout, cache, frame_idx)?;
         self.sync_layout_inner(compositor, shm, layout, input, true)?;
         Ok(())
     }
@@ -347,21 +409,9 @@ impl OverlayScene
     ) -> Result<Option<ImageBufferRing>, OverlayError>
     {
         let (target_w, target_h) = self.oriented_target_size(layout);
-        if self.frame_ring.dimensions() != (target_w, target_h)
-        {
-            let mut replacement = ImageBufferRing::new(shm, target_w, target_h)?;
-            fill_ring_slot(&mut replacement, &self.image_surface, layout, frame_argb)?;
-            let retired = std::mem::replace(&mut self.frame_ring, replacement);
-            return Ok(Some(retired));
-        }
-
-        fill_ring_slot(
-            &mut self.frame_ring,
-            &self.image_surface,
-            layout,
-            frame_argb,
-        )?;
-        Ok(None)
+        with_target_ring(&mut self.frame_ring, shm, target_w, target_h, |ring| {
+            fill_ring_slot(ring, &self.image_surface, layout, frame_argb)
+        })
     }
 
     /// Updates image subsurface position/scale, handle visibility/hover, dashed border, and input region.
@@ -486,6 +536,26 @@ impl OverlayScene
     {
         self.chrome.sync_handle(layout.input_rect(false), input)
     }
+}
+
+/// Sizes `frame_ring` to `(target_w, target_h)` when needed, runs `fill`, and returns any retired ring.
+fn with_target_ring(
+    frame_ring: &mut ImageBufferRing,
+    shm: &Shm,
+    target_w: u32,
+    target_h: u32,
+    fill: impl FnOnce(&mut ImageBufferRing) -> Result<(), OverlayError>,
+) -> Result<Option<ImageBufferRing>, OverlayError>
+{
+    if frame_ring.dimensions() != (target_w, target_h)
+    {
+        let mut replacement = ImageBufferRing::new(shm, target_w, target_h)?;
+        fill(&mut replacement)?;
+        return Ok(Some(std::mem::replace(frame_ring, replacement)));
+    }
+
+    fill(frame_ring)?;
+    Ok(None)
 }
 
 /// Writes `frame_argb` directly into an SHM slot of `ring` (raw copy or fractional rotation).

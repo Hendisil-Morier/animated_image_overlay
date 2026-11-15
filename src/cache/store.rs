@@ -213,6 +213,17 @@ impl FrameCache
         lock_mutex(&self.shared).decode_done
     }
 
+    /// Returns `(frame_count, decode_done, fits_source_ram_budget)` under one lock.
+    pub fn cache_profile(&self) -> (usize, bool, bool)
+    {
+        let guard = lock_mutex(&self.shared);
+        (
+            guard.delays_ms.len(),
+            guard.decode_done,
+            guard.fits_ram_budget(),
+        )
+    }
+
     /// Returns current uncompressed RAM bytes held in the frame LRU cache.
     pub fn ram_used_bytes(&self) -> usize
     {
