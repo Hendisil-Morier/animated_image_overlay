@@ -52,13 +52,31 @@ impl FrameCache
         wakeup: Option<WakeupCallback>,
     ) -> Result<Self, OverlayError>
     {
+        Self::open_with_ram_budget(
+            image_path,
+            base_width,
+            max_frames,
+            DEFAULT_RAM_CACHE_BUDGET_BYTES,
+            wakeup,
+        )
+    }
+
+    /// Opens an overlay frame store honoring a custom uncompressed RAM cache ceiling in bytes.
+    pub fn open_with_ram_budget(
+        image_path: &Path,
+        base_width: u32,
+        max_frames: usize,
+        ram_budget_bytes: usize,
+        wakeup: Option<WakeupCallback>,
+    ) -> Result<Self, OverlayError>
+    {
         let cache_dir = default_cache_dir()?;
         Self::open_in_dir(
             image_path,
             base_width,
             max_frames,
             cache_dir,
-            DEFAULT_RAM_CACHE_BUDGET_BYTES,
+            ram_budget_bytes,
             DEFAULT_PRUNE_AGE_DAYS,
             wakeup,
         )

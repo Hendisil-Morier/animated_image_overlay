@@ -1,8 +1,8 @@
 //! Command-line argument parsing and validation for the Wayland image overlay.
 //!
 //! Preserves exact CLI parity with the Python launcher (`FILE`, `-n`/`--max-frames`,
-//! `-w`/`--base-width`, `-m`/`--monitor`, and `-s`/`--scale`) while rejecting
-//! non-positive widths, invalid scales, and missing image files before startup.
+//! `-w`/`--base-width`, `-m`/`--monitor`, `-s`/`--scale`, `-r`/`--ram-cache-mb`, and `-e`/`--edit`)
+//! while rejecting non-positive widths, overflowed cache limits, invalid scales, and missing files.
 
 // Standard path and OS argument string types.
 use std::{ffi::OsString, path::PathBuf};
@@ -10,11 +10,14 @@ use std::{ffi::OsString, path::PathBuf};
 // Clap derive macros and error classification for structured CLI parsing.
 use clap::{Parser, error::ErrorKind};
 
-// Top-level error enum returned on validation failure.
-use crate::error::OverlayError;
+// Default uncompressed RAM cache budget constant and validation error type.
+use crate::{cache::DEFAULT_RAM_CACHE_BUDGET_BYTES, error::OverlayError};
 
 // Default stored cache/display width in logical pixels when `--base-width` is omitted.
 const DEFAULT_BASE_WIDTH: u32 = 500;
+
+// Default uncompressed RAM cache budget in MiB derived from the cache store ceiling.
+const DEFAULT_RAM_CACHE_MB: usize = DEFAULT_RAM_CACHE_BUDGET_BYTES / (1024 * 1024);
 
 // Default target monitor selector when `--monitor` is omitted.
 const DEFAULT_MONITOR: &str = "0";
@@ -94,6 +97,15 @@ pub struct CliArgs
     )]
     pub scale: Option<f64>,
 
+    /// Uncompressed frame RAM cache budget in MiB (`0` = stream every frame from disk, default: `128`).
+    #[arg(
+        short = 'r',
+        long = "ram-cache-mb",
+        default_value_t = DEFAULT_RAM_CACHE_MB,
+        help = "Uncompressed RAM cache budget in MiB (0 = stream from disk, default: 128)."
+    )]
+    pub ram_cache_mb: usize,
+
     /// Start directly in interactive edit mode with borders and keyboard focus enabled.
     #[arg(
         short = 'e',
@@ -154,7 +166,17 @@ impl CliArgs
         }
     }
 
-    /// Verifies numeric constraints (`base_width >= 1`, finite positive `scale`, non-empty monitor).
+    /// Converts `ram_cache_mb` (MiB) into bytes, rejecting overflowed counts.
+    pub fn ram_cache_bytes(&self) -> Result<usize, OverlayError>
+    {
+        self.ram_cache_mb.checked_mul(1024 * 1024).ok_or_else(|| {
+            OverlayError::CliValidation(String::from(
+                "--ram-cache-mb overflows addressable memory byte count",
+            ))
+        })
+    }
+
+    /// Verifies numeric constraints (`base_width >= 1`, finite positive `scale`, valid RAM cap, monitor).
     pub fn validate_numbers(&self) -> Result<(), OverlayError>
     {
         if self.base_width < 1
@@ -178,6 +200,8 @@ impl CliArgs
                 "--monitor must not be empty",
             )));
         }
+
+        let _ = self.ram_cache_bytes()?;
 
         Ok(())
     }

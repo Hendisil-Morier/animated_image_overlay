@@ -18,7 +18,7 @@ cargo build --release
 Run the overlay:
 
 ```bash
-./target/release/animated_image_widget FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE]
+./target/release/animated_image_widget FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE] [-r RAM_CACHE_MB] [-e]
 ```
 
 Options:
@@ -27,6 +27,8 @@ Options:
 - `-w`, `--base-width`: Width in pixels used for stored cache frames (default: `500`; never upscales smaller files).
 - `-m`, `--monitor`: Target monitor index or connector name such as `DP-1` (default: `0`).
 - `-s`, `--scale`: Initial display scale, overriding any saved scale for that file.
+- `-r`, `--ram-cache-mb`: Uncompressed frame RAM cache budget in MiB (`0` streams all frames from disk; default: `128`).
+- `-e`, `--edit`: Launch directly into interactive edit mode.
 
 Set `OVERLAY_DEBUG=1` to mirror debug diagnostics to stdout alongside the rolling daily log files in `~/.cache/apng-overlay/logs/`.
 

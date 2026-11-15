@@ -83,7 +83,14 @@ pub fn run_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayE
         wakeup_ping.ping();
     });
 
-    let cache = FrameCache::open(&cli.file, cli.base_width, cli.max_frames, Some(wakeup_cb))?;
+    let ram_budget_bytes = cli.ram_cache_bytes()?;
+    let cache = FrameCache::open_with_ram_budget(
+        &cli.file,
+        cli.base_width,
+        cli.max_frames,
+        ram_budget_bytes,
+        Some(wakeup_cb),
+    )?;
     let (frame_w, frame_h) = cache.frame_dimensions();
 
     let mut event_loop: EventLoop<OverlayRuntime> = EventLoop::try_new().map_err(|err| {
