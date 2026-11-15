@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.3.0] - 2026-11-15
 
 ### Added
 - Added [ARCHITECTURE.md](ARCHITECTURE.md) documenting the Wayland layer-shell/subsurface scene, headerless `v2-lraw-argb8888` `.lraw`/`.json` cache format, `apng-overlay.json` schema/concurrency lock, and `calloop`/logging lifecycle.
