@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.3.1] - 2026-11-15
 
 ### Changed
 - Extracted software corner handle and dashed outline rasterization plus `ChromeGeometry` and `needs_chrome_rebuild` into `src/wayland/chrome_raster.rs`, keeping Wayland subsurface orchestration in `src/wayland/chrome.rs`.
