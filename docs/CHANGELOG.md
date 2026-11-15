@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.2.2] - 2026-11-15
 
 ### Added
 - Added `-r` / `--ram-cache-mb` CLI flag (`FrameCache::open_with_ram_budget`) to set the RAM ceiling in MiB for keeping decoded frames in memory or pass `0` to read every animation from disk (default: `128`).
