@@ -259,7 +259,7 @@ impl OverlayRuntime
                 && self
                     .scene
                     .as_ref()
-                    .is_some_and(|scene| scene.needs_fractional_resync(&self.layout)));
+                    .is_some_and(|scene| scene.needs_buffer_resync(&self.layout, &self.cache)));
 
         if needs_redraw
         {

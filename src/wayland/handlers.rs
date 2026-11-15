@@ -94,7 +94,7 @@ impl CompositorHandler for OverlayRuntime
         {
             tracing::warn!(error = %err, scale, "Failed scaling overlay chrome buffers");
         }
-        if self.configured && scene.needs_fractional_resync(&self.layout)
+        if self.configured && scene.needs_buffer_resync(&self.layout, &self.cache)
         {
             self.refresh_active_oriented_frame();
         }

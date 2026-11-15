@@ -77,33 +77,28 @@ impl DisplayFrameCache
             .sum()
     }
 
+    /// Reports whether `frame_count` frames at `(width, height)` fit inside `budget_bytes`.
+    pub fn would_fit(&self, width: u32, height: u32, frame_count: usize, decode_done: bool)
+    -> bool
+    {
+        if !decode_done || frame_count <= 1 || self.budget_bytes == 0
+        {
+            return false;
+        }
+
+        checked_argb_byte_len(width, height)
+            .ok()
+            .and_then(|frame_bytes| frame_count.checked_mul(frame_bytes))
+            .is_some_and(|total_bytes| total_bytes <= self.budget_bytes)
+    }
+
     /// Validates `key`, `frame_count`, and `decode_done` against `budget_bytes`, resizing slots as needed.
     ///
     /// Releases all retained frame buffers immediately if the animation exceeds budget, has fewer
     /// than two frames, or is still streaming an unknown frame count.
     pub fn sync(&mut self, key: DisplayCacheKey, frame_count: usize, decode_done: bool) -> bool
     {
-        if !decode_done || frame_count <= 1 || self.budget_bytes == 0
-        {
-            self.clear();
-            return false;
-        }
-
-        let Ok(frame_bytes) = checked_argb_byte_len(key.width, key.height)
-        else
-        {
-            self.clear();
-            return false;
-        };
-
-        let Some(total_bytes) = frame_count.checked_mul(frame_bytes)
-        else
-        {
-            self.clear();
-            return false;
-        };
-
-        if total_bytes > self.budget_bytes
+        if !self.would_fit(key.width, key.height, frame_count, decode_done)
         {
             self.clear();
             return false;
@@ -113,6 +108,13 @@ impl DisplayFrameCache
         {
             return true;
         }
+
+        let Ok(frame_bytes) = checked_argb_byte_len(key.width, key.height)
+        else
+        {
+            self.clear();
+            return false;
+        };
 
         self.active_key = Some(key);
         self.expected_frame_bytes = frame_bytes;

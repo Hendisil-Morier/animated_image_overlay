@@ -27,7 +27,13 @@ fn display_cache_enforces_budgets_streaming_state_and_invalidation()
     let mut disabled = DisplayFrameCache::new(0);
     assert!(!disabled.sync(make_key(10, 10, 45.0, false), 3, true));
 
-    // Exact budget accepts all 4 frames (`4 * 10 * 10 * 4 = 1600` bytes).
+    // Exact budget accepts all 4 frames (`4 * 10 * 10 * 4 = 1600` bytes), while 5 exceeds it.
+    assert!(cache.would_fit(10, 10, 4, true));
+    assert!(!cache.would_fit(10, 10, 5, true));
+    assert!(!cache.would_fit(10, 10, 4, false));
+    assert!(!cache.would_fit(10, 10, 1, true));
+    assert!(!cache.would_fit(u32::MAX, u32::MAX, 2, true));
+
     let key = make_key(10, 10, 310.0, false);
     assert!(cache.sync(key, 4, true));
     assert!(cache.is_active());

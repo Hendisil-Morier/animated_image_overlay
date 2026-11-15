@@ -4,7 +4,10 @@
 use std::path::PathBuf;
 
 // Lanczos3 SIMD downscaler preserving alpha channels cleanly.
-use fast_image_resize::{PixelType, ResizeOptions, Resizer, images::Image as FirImage};
+use fast_image_resize::{
+    PixelType, ResizeOptions, Resizer,
+    images::{Image as FirImage, ImageRef},
+};
 // Fast LZ4 compression prepending uncompressed payload byte length.
 use lz4_flex::compress_prepend_size;
 
@@ -150,6 +153,40 @@ pub(crate) fn encode_subsequent_frame(
     })
 }
 
+/// Downscales a borrowed premultiplied `ARGB8888` pixel buffer to `(dst_w, dst_h)` with Lanczos3.
+pub fn resize_premultiplied_argb8888(
+    src: &[u8],
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+    resizer: &mut Resizer,
+) -> Result<Vec<u8>, CacheError>
+{
+    validate_argb_buffer("source", src_w, src_h, src.len())?;
+    let _ = checked_argb_byte_len(dst_w, dst_h)?;
+    if src_w == dst_w && src_h == dst_h
+    {
+        return Ok(src.to_vec());
+    }
+
+    let src_img =
+        ImageRef::new(src_w, src_h, src, PixelType::U8x4).map_err(|err| CacheError::Decode {
+            path: PathBuf::from("<memory>"),
+            reason: err.to_string(),
+        })?;
+
+    let mut dst_img = FirImage::new(dst_w, dst_h, PixelType::U8x4);
+    resizer
+        .resize(&src_img, &mut dst_img, &ResizeOptions::default())
+        .map_err(|err| CacheError::Decode {
+            path: PathBuf::from("<memory>"),
+            reason: err.to_string(),
+        })?;
+
+    Ok(dst_img.into_vec())
+}
+
 /// Downscales `rgba` with Lanczos3 only when `target_w < src_w`, preserving original size otherwise.
 fn downscale_if_needed(
     rgba: Vec<u8>,
@@ -165,22 +202,7 @@ fn downscale_if_needed(
         return Ok(rgba);
     }
 
-    let src_img = FirImage::from_vec_u8(src_w, src_h, rgba, PixelType::U8x4).map_err(|err| {
-        CacheError::Decode {
-            path: PathBuf::from("<memory>"),
-            reason: err.to_string(),
-        }
-    })?;
-
-    let mut dst_img = FirImage::new(target_w, target_h, PixelType::U8x4);
-    resizer
-        .resize(&src_img, &mut dst_img, &ResizeOptions::default())
-        .map_err(|err| CacheError::Decode {
-            path: PathBuf::from("<memory>"),
-            reason: err.to_string(),
-        })?;
-
-    Ok(dst_img.into_vec())
+    resize_premultiplied_argb8888(&rgba, src_w, src_h, target_w, target_h, resizer)
 }
 
 // 40.24 fixed-point sampling resolution (24 fractional bits, 12-bit bilinear weights).

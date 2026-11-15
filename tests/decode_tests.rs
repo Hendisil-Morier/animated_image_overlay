@@ -13,11 +13,13 @@ use std::{
 
 use animated_image_widget::{
     decode::{
-        DecodedFirstFrame, EncodedFrame, FrameDecoder, FrameStreamSink, rotate_argb8888_into,
+        DecodedFirstFrame, EncodedFrame, FrameDecoder, FrameStreamSink,
+        resize_premultiplied_argb8888, rotate_argb8888_into,
         straight_rgba_to_premultiplied_argb8888,
     },
     error::CacheError,
 };
+use fast_image_resize::Resizer;
 use image::{
     Delay, Frame as ImgFrame, ImageEncoder, RgbaImage,
     codecs::{bmp::BmpEncoder, gif::GifEncoder, png::PngEncoder},
@@ -682,4 +684,27 @@ fn rotate_argb8888_handles_chirality_and_transparent_apron_antialiasing()
         let center_off = (12 * 24 + 12) * 4;
         assert_eq!(dst_grad[center_off + 3], 255);
     }
+}
+
+#[test]
+fn resize_premultiplied_argb8888_downscales_and_preserves_identity()
+{
+    let mut resizer = Resizer::new();
+    let solid: Vec<u8> = [30_u8, 90, 180, 255]
+        .into_iter()
+        .cycle()
+        .take(20 * 10 * 4)
+        .collect();
+
+    // Matching source and destination dimensions copy bytes identically without Lanczos filtering.
+    let same = resize_premultiplied_argb8888(&solid, 20, 10, 20, 10, &mut resizer).unwrap();
+    assert_eq!(same, solid);
+
+    // Downscaling halves dimensions while preserving solid premultiplied pixel values.
+    let small = resize_premultiplied_argb8888(&solid, 20, 10, 10, 5, &mut resizer).unwrap();
+    assert_eq!(small.len(), 10 * 5 * 4);
+    assert_eq!(&small[0..4], &[30, 90, 180, 255]);
+
+    // Mismatched source byte counts return an error rather than resizing invalid memory.
+    assert!(resize_premultiplied_argb8888(&solid[..16], 20, 10, 10, 5, &mut resizer).is_err());
 }
