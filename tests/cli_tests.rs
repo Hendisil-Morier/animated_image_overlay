@@ -38,9 +38,15 @@ fn cli_applies_default_flags()
     assert_eq!(args.monitor, "0");
     assert_eq!(args.scale, None);
     assert_eq!(args.ram_cache_mb, 128);
+    assert_eq!(args.display_cache_mb, 64);
     assert_eq!(
         args.ram_cache_bytes().expect("default byte budget fits"),
         128 * 1024 * 1024
+    );
+    assert_eq!(
+        args.display_cache_bytes()
+            .expect("default display byte budget fits"),
+        64 * 1024 * 1024
     );
     assert!(!args.edit);
     assert!(!args.debug);
@@ -152,6 +158,7 @@ fn cli_handles_help_flag_as_early_exit()
     for expected in [
         "--base-width",
         "--ram-cache-mb",
+        "--cap",
         "--edit",
         "--debug",
         "Triple-click",
@@ -172,6 +179,69 @@ fn cli_handles_help_flag_as_early_exit()
         assert!(
             text.contains(expected),
             "--help output missing {expected:?}:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn cli_parses_and_validates_cap_suboptions()
+{
+    let CliOutcome::Run(ram_only) =
+        CliArgs::parse_flags_from(["overlay", "a.apng", "-c", "ram=10"]).unwrap()
+    else
+    {
+        panic!("expected Run");
+    };
+    assert_eq!(ram_only.ram_cache_mb, 10);
+    assert_eq!(ram_only.display_cache_mb, 64);
+
+    let CliOutcome::Run(display_only) =
+        CliArgs::parse_flags_from(["overlay", "a.apng", "--cap", "display=32"]).unwrap()
+    else
+    {
+        panic!("expected Run");
+    };
+    assert_eq!(display_only.ram_cache_mb, 128);
+    assert_eq!(display_only.display_cache_mb, 32);
+
+    let CliOutcome::Run(both) =
+        CliArgs::parse_flags_from(["overlay", "a.apng", "-r", "256", "-c", "ram=0,display=128"])
+            .unwrap()
+    else
+    {
+        panic!("expected Run");
+    };
+    assert_eq!(both.ram_cache_bytes().unwrap(), 0);
+    assert_eq!(both.display_cache_bytes().unwrap(), 128 * 1024 * 1024);
+
+    let CliOutcome::Run(repeated) =
+        CliArgs::parse_flags_from(["overlay", "a.apng", "-c", "ram=16", "-c", "display=0"])
+            .unwrap()
+    else
+    {
+        panic!("expected Run");
+    };
+    assert_eq!(repeated.ram_cache_mb, 16);
+    assert_eq!(repeated.display_cache_bytes().unwrap(), 0);
+
+    let max_mb = usize::MAX.to_string();
+    let bad_overflow = format!("display={max_mb}");
+    for bad in [
+        ["overlay", "a.apng", "-c", ""].as_slice(),
+        ["overlay", "a.apng", "-c", "ram"].as_slice(),
+        ["overlay", "a.apng", "-c", "ram=10,"].as_slice(),
+        ["overlay", "a.apng", "-c", "unknown=10"].as_slice(),
+        ["overlay", "a.apng", "-c", "display=abc"].as_slice(),
+        ["overlay", "a.apng", "-c", "display=-1"].as_slice(),
+        ["overlay", "a.apng", "-c", bad_overflow.as_str()].as_slice(),
+    ]
+    {
+        assert!(
+            matches!(
+                CliArgs::parse_flags_from(bad.iter().copied()),
+                Err(OverlayError::CliValidation(_))
+            ),
+            "expected CliValidation for {bad:?}"
         );
     }
 }

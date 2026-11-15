@@ -1,14 +1,14 @@
 //! Command-line argument parsing and validation for the Wayland image overlay.
 //!
 //! Preserves exact CLI parity with the Python launcher (`FILE`, `-n`/`--max-frames`,
-//! `-w`/`--base-width`, `-m`/`--monitor`, `-s`/`--scale`, `-r`/`--ram-cache-mb`, `-e`/`--edit`,
-//! and `-d`/`--debug`) while rejecting invalid numeric inputs and missing files.
+//! `-w`/`--base-width`, `-m`/`--monitor`, `-s`/`--scale`, `-r`/`--ram-cache-mb`, `-c`/`--cap`,
+//! `-e`/`--edit`, and `-d`/`--debug`) while rejecting invalid numeric inputs and missing files.
 
 // Standard path and OS argument string types.
 use std::{ffi::OsString, path::PathBuf};
 
 // Clap derive macros and error classification for structured CLI parsing.
-use clap::{Parser, error::ErrorKind};
+use clap::{ArgAction, Parser, error::ErrorKind};
 
 // Default uncompressed RAM cache budget constant and validation error type.
 use crate::{cache::DEFAULT_RAM_CACHE_BUDGET_BYTES, error::OverlayError};
@@ -18,6 +18,9 @@ const DEFAULT_BASE_WIDTH: u32 = 500;
 
 // Default uncompressed RAM cache budget in MiB derived from the cache store ceiling.
 const DEFAULT_RAM_CACHE_MB: usize = DEFAULT_RAM_CACHE_BUDGET_BYTES / (1024 * 1024);
+
+// Default RAM limit in MiB for caching display-resolution frames (`64 MiB`).
+const DEFAULT_DISPLAY_CACHE_MB: usize = 64;
 
 // Default target monitor selector when `--monitor` is omitted.
 const DEFAULT_MONITOR: &str = "0";
@@ -110,6 +113,20 @@ pub struct CliArgs
     )]
     pub ram_cache_mb: usize,
 
+    /// Comma-separated cache limits in MiB (`ram=<MB>,display=<MB>`), overriding defaults cleanly.
+    #[arg(
+        short = 'c',
+        long = "cap",
+        value_name = "SPEC",
+        action = ArgAction::Append,
+        help = "Cache MiB caps as key=value pairs (e.g. -c ram=128,display=64; 0 disables)."
+    )]
+    pub cap: Vec<String>,
+
+    /// Resolved RAM limit in MiB for display-resolution frame caching (`0` disables, default: `64`).
+    #[arg(skip = DEFAULT_DISPLAY_CACHE_MB)]
+    pub display_cache_mb: usize,
+
     /// Start directly in interactive edit mode with borders and keyboard focus enabled.
     #[arg(
         short = 'e',
@@ -141,7 +158,7 @@ impl CliArgs
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
     {
-        let parsed = match <Self as Parser>::try_parse_from(args)
+        let mut parsed = match <Self as Parser>::try_parse_from(args)
         {
             Ok(cli) => cli,
             Err(err) =>
@@ -157,6 +174,7 @@ impl CliArgs
             }
         };
 
+        parsed.apply_cap_overrides()?;
         parsed.validate_numbers()?;
         Ok(CliOutcome::Run(parsed))
     }
@@ -178,17 +196,71 @@ impl CliArgs
         }
     }
 
-    /// Converts `ram_cache_mb` (MiB) into bytes, rejecting overflowed counts.
-    pub fn ram_cache_bytes(&self) -> Result<usize, OverlayError>
+    /// Resolves `-c` / `--cap` (`ram=<MB>,display=<MB>`) entries onto `ram_cache_mb` and `display_cache_mb`.
+    fn apply_cap_overrides(&mut self) -> Result<(), OverlayError>
     {
-        self.ram_cache_mb.checked_mul(1024 * 1024).ok_or_else(|| {
-            OverlayError::CliValidation(String::from(
-                "--ram-cache-mb overflows addressable memory byte count",
-            ))
+        self.display_cache_mb = DEFAULT_DISPLAY_CACHE_MB;
+        for spec in &self.cap
+        {
+            if spec.trim().is_empty()
+            {
+                return Err(OverlayError::CliValidation(String::from(
+                    "--cap value must not be empty (expected ram=<MB> or display=<MB>)",
+                )));
+            }
+            for item in spec.split(',')
+            {
+                let item = item.trim();
+                let Some((key, val)) = item.split_once('=')
+                else
+                {
+                    return Err(OverlayError::CliValidation(format!(
+                        "Invalid --cap entry '{item}' (expected ram=<MB> or display=<MB>)"
+                    )));
+                };
+                let key = key.trim();
+                let mb = val.trim().parse::<usize>().map_err(|_| {
+                    OverlayError::CliValidation(format!(
+                        "Invalid --cap MiB count '{val}' for '{key}'"
+                    ))
+                })?;
+                match key
+                {
+                    "ram" => self.ram_cache_mb = mb,
+                    "display" => self.display_cache_mb = mb,
+                    _ =>
+                    {
+                        return Err(OverlayError::CliValidation(format!(
+                            "Unknown --cap key '{key}' (expected ram or display)"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Converts a MiB limit into bytes cleanly, rejecting overflowed counts.
+    fn mb_to_bytes(mb: usize, label: &str) -> Result<usize, OverlayError>
+    {
+        mb.checked_mul(1024 * 1024).ok_or_else(|| {
+            OverlayError::CliValidation(format!("{label} overflows addressable memory byte count"))
         })
     }
 
-    /// Verifies numeric constraints (`base_width >= 1`, finite positive `scale`, valid RAM cap, monitor).
+    /// Converts `ram_cache_mb` (MiB) into bytes, rejecting overflowed counts.
+    pub fn ram_cache_bytes(&self) -> Result<usize, OverlayError>
+    {
+        Self::mb_to_bytes(self.ram_cache_mb, "--ram-cache-mb / --cap ram")
+    }
+
+    /// Converts `display_cache_mb` (MiB) into bytes, rejecting overflowed counts.
+    pub fn display_cache_bytes(&self) -> Result<usize, OverlayError>
+    {
+        Self::mb_to_bytes(self.display_cache_mb, "--cap display")
+    }
+
+    /// Verifies numeric constraints (`base_width >= 1`, finite positive `scale`, valid cache caps, monitor).
     pub fn validate_numbers(&self) -> Result<(), OverlayError>
     {
         if self.base_width < 1
@@ -214,6 +286,7 @@ impl CliArgs
         }
 
         let _ = self.ram_cache_bytes()?;
+        let _ = self.display_cache_bytes()?;
 
         Ok(())
     }
