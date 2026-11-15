@@ -1,0 +1,272 @@
+//! Persistent per-image overlay position and scale storage.
+//!
+//! Reads and updates `~/.config/apng-overlay.json` while preserving entries written
+//! by other image instances via an exclusive `flock` on `<config>.lock` and atomic
+//! sibling temporary file replacement.
+
+// Standard library paths, file handles, environment lookup, and lexical normalization.
+use std::{
+    env,
+    fs::{self, File, OpenOptions},
+    path::{Component, Path, PathBuf},
+};
+
+// Serialization traits and dynamic map representation preserving foreign JSON keys.
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+// Shared crash-safe atomic writer and project domain errors.
+use crate::{
+    atomic_fs,
+    error::{ConfigError, OverlayError},
+};
+
+/// Default horizontal coordinate when an image has no valid saved entry.
+pub const DEFAULT_POS_X: f64 = 100.0;
+
+/// Default vertical coordinate when an image has no valid saved entry.
+pub const DEFAULT_POS_Y: f64 = 100.0;
+
+/// Default scale multiplier when an image has no valid saved entry.
+pub const DEFAULT_SCALE: f64 = 0.6;
+
+/// Persisted overlay placement and scale relative to stored base image dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct OverlayState
+{
+    /// Left offset in logical compositor pixels from the target monitor origin.
+    pub x: f64,
+
+    /// Top offset in logical compositor pixels from the target monitor origin.
+    pub y: f64,
+
+    /// Display multiplier applied to the stored base frame dimensions.
+    pub scale: f64,
+}
+
+impl Default for OverlayState
+{
+    /// Returns the baseline startup placement and scale matching Python defaults.
+    fn default() -> Self
+    {
+        Self {
+            x: DEFAULT_POS_X,
+            y: DEFAULT_POS_Y,
+            scale: DEFAULT_SCALE,
+        }
+    }
+}
+
+/// RAII guard holding an exclusive advisory file lock via `std::fs::File::lock`.
+struct ExclusiveLockGuard
+{
+    // Locked descriptor released explicitly on drop.
+    file: File,
+}
+
+impl Drop for ExclusiveLockGuard
+{
+    /// Unlocks the advisory lock before closing the file descriptor.
+    fn drop(&mut self)
+    {
+        let _ = self.file.unlock();
+    }
+}
+
+/// Manages locked reads and atomic saves of per-file overlay geometry in JSON format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigStore
+{
+    // Path to the shared JSON configuration file (e.g. `~/.config/apng-overlay.json`).
+    path: PathBuf,
+}
+
+impl ConfigStore
+{
+    /// Creates a store targeting an explicit JSON configuration path.
+    pub fn new(path: impl Into<PathBuf>) -> Self
+    {
+        Self { path: path.into() }
+    }
+
+    /// Resolves and constructs the default `~/.config/apng-overlay.json` store.
+    pub fn open_default() -> Result<Self, OverlayError>
+    {
+        Ok(Self::new(default_config_path()?))
+    }
+
+    /// Returns the path of the JSON configuration file.
+    pub fn path(&self) -> &Path
+    {
+        &self.path
+    }
+
+    /// Returns the sibling lock file path (`<config>.lock`).
+    pub fn lock_path(&self) -> PathBuf
+    {
+        let mut os_path = self.path.as_os_str().to_os_string();
+        os_path.push(".lock");
+        PathBuf::from(os_path)
+    }
+
+    /// Computes a normalized absolute path key compatible with Python `os.path.abspath`.
+    pub fn state_key(image_path: &Path) -> Result<String, OverlayError>
+    {
+        let abs = std::path::absolute(image_path).map_err(|source| ConfigError::Io {
+            path: image_path.to_path_buf(),
+            source,
+        })?;
+
+        Ok(normalize_lexical(&abs).to_string_lossy().into_owned())
+    }
+
+    /// Loads saved state for `key`, falling back per-field to defaults when missing or corrupt.
+    pub fn load_state_entry(&self, key: &str) -> OverlayState
+    {
+        let mut state = OverlayState::default();
+        let data = self.read_config_map();
+
+        let Some(Value::Object(entry)) = data.get(key)
+        else
+        {
+            return state;
+        };
+
+        if let Some(x) = entry.get("x").and_then(extract_finite_number)
+        {
+            state.x = x;
+        }
+
+        if let Some(y) = entry.get("y").and_then(extract_finite_number)
+        {
+            state.y = y;
+        }
+
+        if let Some(scale) = entry.get("scale").and_then(extract_finite_number)
+        {
+            state.scale = scale;
+        }
+
+        state
+    }
+
+    /// Saves `state` under `key` while holding an exclusive `flock` on `<config>.lock`.
+    pub fn save_state_entry(&self, key: &str, state: OverlayState) -> Result<(), OverlayError>
+    {
+        let parent = self
+            .path
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .ok_or_else(|| ConfigError::MissingParent {
+                path: self.path.clone(),
+            })?;
+
+        fs::create_dir_all(parent).map_err(|source| ConfigError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+
+        let lock_path = self.lock_path();
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|source| ConfigError::Lock {
+                path: lock_path.clone(),
+                source,
+            })?;
+
+        lock_file.lock().map_err(|source| ConfigError::Lock {
+            path: lock_path.clone(),
+            source,
+        })?;
+
+        let _lock_guard = ExclusiveLockGuard { file: lock_file };
+
+        let mut data = self.read_config_map();
+        let state_value = serde_json::to_value(state).map_err(|source| ConfigError::Serialize {
+            path: self.path.clone(),
+            source,
+        })?;
+        data.insert(key.to_owned(), state_value);
+
+        let bytes = serde_json::to_vec(&data).map_err(|source| ConfigError::Serialize {
+            path: self.path.clone(),
+            source,
+        })?;
+
+        atomic_fs::write_bytes(&self.path, ".json", &bytes).map_err(|source| ConfigError::Io {
+            path: self.path.clone(),
+            source,
+        })?;
+
+        tracing::debug!(
+            key,
+            x = state.x,
+            y = state.y,
+            scale = state.scale,
+            "Saved overlay state"
+        );
+        Ok(())
+    }
+
+    /// Reads the root JSON object map, returning an empty map when absent or corrupt.
+    fn read_config_map(&self) -> Map<String, Value>
+    {
+        let Ok(raw) = fs::read(&self.path)
+        else
+        {
+            return Map::new();
+        };
+
+        match serde_json::from_slice::<Value>(&raw)
+        {
+            Ok(Value::Object(map)) => map,
+            _ => Map::new(),
+        }
+    }
+}
+
+/// Resolves the shared config path `~/.config/apng-overlay.json`.
+pub fn default_config_path() -> Result<PathBuf, ConfigError>
+{
+    let home = env::var_os("HOME")
+        .filter(|path| !path.is_empty())
+        .ok_or(ConfigError::DirectoryUnavailable)?;
+
+    Ok(PathBuf::from(home)
+        .join(".config")
+        .join("apng-overlay.json"))
+}
+
+/// Validates that a JSON value represents a finite non-boolean numeric value.
+fn extract_finite_number(value: &Value) -> Option<f64>
+{
+    match value
+    {
+        Value::Number(num) => num.as_f64().filter(|val| val.is_finite()),
+        _ => None,
+    }
+}
+
+/// Collapses `.` and `..` components without dereferencing filesystem symlinks.
+fn normalize_lexical(path: &Path) -> PathBuf
+{
+    let mut normalized = PathBuf::new();
+    for component in path.components()
+    {
+        match component
+        {
+            Component::CurDir =>
+            {}
+            Component::ParentDir =>
+            {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
