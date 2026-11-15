@@ -183,8 +183,9 @@ impl LayerShellHandler for OverlayRuntime
             self.ensure_frame_callback_if_needed();
         }
         else if let Some(scene) = &mut self.scene
+            && let Err(err) = scene.sync_layout(&self.compositor, &self.layout, &self.input)
         {
-            let _ = scene.sync_layout(&self.compositor, &self.layout, &self.input);
+            tracing::warn!(error = %err, "Failed syncing Wayland overlay layout on configure");
         }
     }
 }
@@ -254,11 +255,15 @@ impl SeatHandler for OverlayRuntime
     )
     {
         if capability == Capability::Pointer
-            && let Some(themed) = self.themed_pointer.take()
         {
-            self.last_cursor = None;
-            themed.pointer().release();
-            tracing::debug!("Released Wayland pointer after capability removal");
+            let effects = self.input.on_pointer_detach();
+            self.apply_input_effects(effects);
+            if let Some(themed) = self.themed_pointer.take()
+            {
+                self.last_cursor = None;
+                themed.pointer().release();
+                tracing::debug!("Released Wayland pointer after capability removal");
+            }
         }
 
         if capability == Capability::Keyboard

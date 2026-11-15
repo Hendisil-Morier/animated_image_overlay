@@ -176,6 +176,18 @@ impl InputState
         self.sync_fade_timer(false)
     }
 
+    /// Clears hover, active drag, and click state when `Capability::Pointer` is detached.
+    pub fn on_pointer_detach(&mut self) -> InputEffects
+    {
+        let was_dragging = self.is_dragging();
+        self.hovered = false;
+        self.drag = DragMode::None;
+        self.click_tracker.reset();
+        let mut effects = self.sync_fade_timer(false);
+        effects.schedule_save = was_dragging;
+        effects
+    }
+
     /// Handles pointer motion: drives active move/resize drags and refreshes handle visibility.
     pub fn on_pointer_motion(&mut self, pos: (f64, f64), layout: &mut OverlayLayout)
     -> InputEffects
@@ -225,6 +237,12 @@ impl InputState
     ) -> InputEffects
     {
         let mut effects = self.show_handle_effects();
+        if self.is_dragging() && matches!(button, BTN_LEFT | BTN_RIGHT)
+        {
+            self.click_tracker.reset();
+            return self.merge_timer_effects(effects);
+        }
+
         let state = layout.state();
 
         match button

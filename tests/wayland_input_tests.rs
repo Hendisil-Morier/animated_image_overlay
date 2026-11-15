@@ -313,3 +313,44 @@ fn passive_handle_drag_moves_overlay_and_updates_cursor_and_input_region()
     assert!(released.schedule_save);
     assert_eq!(input.desired_cursor(target, &layout), PointerCursor::Grab);
 }
+
+#[test]
+fn pointer_detach_and_chorded_buttons_preserve_consistent_drag_state()
+{
+    let mut layout = sample_layout();
+    let mut input = InputState::default();
+
+    // Start a left-button move drag; chorded BTN_RIGHT press and release must not clobber Move.
+    let _enter = input.on_pointer_enter();
+    let _press_left = input.on_button_press(BTN_LEFT, 1000, (300.0, 300.0), &layout);
+    let _chord_right = input.on_button_press(BTN_RIGHT, 1050, (310.0, 300.0), &layout);
+    assert_eq!(
+        input.desired_cursor((310.0, 300.0), &layout),
+        PointerCursor::Grabbing
+    );
+    assert!(!input.on_button_release(BTN_RIGHT).schedule_save);
+    let moved = input.on_pointer_motion((340.0, 320.0), &mut layout);
+    assert!(moved.layout_changed);
+    assert_eq!(layout.state().x, 240.0);
+    assert_eq!(layout.state().y, 170.0);
+
+    // Detaching pointer mid-drag clears hover and drag, schedules save, and rearms fade timer.
+    let detached = input.on_pointer_detach();
+    assert!(!input.hovered);
+    assert!(!input.is_dragging());
+    assert_eq!(input.click_tracker.pending_count(), 0);
+    assert!(detached.schedule_save);
+    assert!(detached.reset_fade_timer);
+
+    // Start a right-button resize drag; chorded BTN_LEFT must preserve Resize without editing toggle.
+    let _enter2 = input.on_pointer_enter();
+    let _press_right = input.on_button_press(BTN_RIGHT, 2000, (400.0, 300.0), &layout);
+    let chord_left = input.on_button_press(BTN_LEFT, 2050, (400.0, 300.0), &layout);
+    assert_eq!(chord_left.edit_mode_changed, None);
+    assert_eq!(
+        input.desired_cursor((400.0, 300.0), &layout),
+        PointerCursor::ResizeBottomRight
+    );
+    assert!(!input.on_button_release(BTN_LEFT).schedule_save);
+    assert!(input.on_button_release(BTN_RIGHT).schedule_save);
+}
