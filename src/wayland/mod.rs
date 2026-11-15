@@ -9,6 +9,9 @@ pub mod app;
 // Corner handle (`28x28` rounded pill) and edit-mode dashed outline subsurfaces.
 pub mod chrome;
 
+// Pure handle/border geometry math and `ARGB8888` pixel rasterization helpers.
+pub mod chrome_raster;
+
 // Bounded in-memory display-resolution `ARGB8888` frame cache.
 pub mod display_cache;
 
