@@ -253,6 +253,18 @@ impl OverlayRuntime
             tracing::debug!(editing, "Toggled edit mode");
         }
 
+        self.sync_scene_for_effects(effects);
+        self.sync_timers_for_effects(effects);
+
+        if effects.toggle_pause
+        {
+            self.apply_pause_toggle();
+        }
+    }
+
+    /// Synchronizes surface layout, resampled frame buffers, or corner handle opacity after input.
+    fn sync_scene_for_effects(&mut self, effects: InputEffects)
+    {
         let needs_redraw = effects.frame_redraw_needed
             || (effects.layout_changed
                 && !self.input.is_resizing()
@@ -260,28 +272,38 @@ impl OverlayRuntime
                     .scene
                     .as_ref()
                     .is_some_and(|scene| scene.needs_buffer_resync(&self.layout, &self.cache)));
-
         if needs_redraw
         {
             self.refresh_active_oriented_frame();
-        }
-        else if let Some(scene) = &mut self.scene
-        {
-            if effects.layout_changed || effects.edit_mode_changed.is_some()
-            {
-                if let Err(err) =
-                    scene.sync_layout(&self.compositor, &self.shm, &self.layout, &self.input)
-                {
-                    tracing::warn!(error = %err, "Failed syncing Wayland overlay layout");
-                }
-            }
-            else if effects.handle_visual_changed
-                && let Err(err) = scene.sync_handle_only(&self.layout, &self.input)
-            {
-                tracing::warn!(error = %err, "Failed syncing corner handle visuals");
-            }
+            return;
         }
 
+        let Some(scene) = &mut self.scene
+        else
+        {
+            return;
+        };
+
+        if effects.layout_changed || effects.edit_mode_changed.is_some()
+        {
+            if let Err(err) =
+                scene.sync_layout(&self.compositor, &self.shm, &self.layout, &self.input)
+            {
+                tracing::warn!(error = %err, "Failed syncing Wayland overlay layout");
+            }
+            return;
+        }
+
+        if effects.handle_visual_changed
+            && let Err(err) = scene.sync_handle_only(&self.layout, &self.input)
+        {
+            tracing::warn!(error = %err, "Failed syncing corner handle visuals");
+        }
+    }
+
+    /// Arms or cancels the handle auto-fade timer and debounced config write timer.
+    fn sync_timers_for_effects(&mut self, effects: InputEffects)
+    {
         if effects.cancel_fade_timer
         {
             self.cancel_fade_timer();
@@ -296,19 +318,20 @@ impl OverlayRuntime
             self.dirty_save = true;
             self.schedule_save_timer();
         }
+    }
 
-        if effects.toggle_pause
+    /// Toggles animation pause state and arms or cancels frame wakeup timers accordingly.
+    fn apply_pause_toggle(&mut self)
+    {
+        let paused = self.playback.toggle_pause();
+        tracing::debug!(paused, "Toggled playback pause");
+        if paused
         {
-            let paused = self.playback.toggle_pause();
-            tracing::debug!(paused, "Toggled playback pause");
-            if paused
-            {
-                self.cancel_frame_timer();
-            }
-            else
-            {
-                self.schedule_playback_if_needed();
-            }
+            self.cancel_frame_timer();
+        }
+        else
+        {
+            self.schedule_playback_if_needed();
         }
     }
 
