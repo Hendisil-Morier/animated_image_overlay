@@ -1,12 +1,13 @@
 //! Persistent per-image overlay position and scale storage.
 //!
-//! Reads and updates `~/.config/apng-overlay.json` while preserving entries written
-//! by other image instances via an exclusive `flock` on `<config>.lock` and atomic
-//! sibling temporary file replacement.
+//! Reads and updates `$XDG_CONFIG_HOME/apng-overlay.json` (or `~/.config/apng-overlay.json`)
+//! while preserving entries written by other image instances via an exclusive `flock` on
+//! `<config>.lock` and atomic sibling temporary file replacement.
 
-// Standard library paths, file handles, environment lookup, and lexical normalization.
+// Standard library paths, OS environment strings, file handles, and lexical normalization.
 use std::{
     env,
+    ffi::OsStr,
     fs::{self, File, OpenOptions},
     path::{Component, Path, PathBuf},
 };
@@ -15,11 +16,15 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-// Shared crash-safe atomic writer and project domain errors.
+// Shared crash-safe atomic writer, XDG lookup helper, and project domain errors.
 use crate::{
     atomic_fs,
     error::{ConfigError, OverlayError},
+    xdg,
 };
+
+// Shared JSON configuration filename placed under the user XDG config directory.
+const CONFIG_FILE_NAME: &str = "apng-overlay.json";
 
 /// Default horizontal coordinate when an image has no valid saved entry.
 pub const DEFAULT_POS_X: f64 = 100.0;
@@ -89,7 +94,7 @@ impl ConfigStore
         Self { path: path.into() }
     }
 
-    /// Resolves and constructs the default `~/.config/apng-overlay.json` store.
+    /// Resolves and constructs the default XDG configuration file store.
     pub fn open_default() -> Result<Self, OverlayError>
     {
         Ok(Self::new(default_config_path()?))
@@ -229,16 +234,23 @@ impl ConfigStore
     }
 }
 
-/// Resolves the shared config path `~/.config/apng-overlay.json`.
+/// Resolves the shared config path from explicit `XDG_CONFIG_HOME` and `HOME` values.
+pub fn config_path_from_env(
+    xdg_config_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Result<PathBuf, ConfigError>
+{
+    xdg::base_dir(xdg_config_home, home, ".config")
+        .map(|dir| dir.join(CONFIG_FILE_NAME))
+        .ok_or(ConfigError::DirectoryUnavailable)
+}
+
+/// Resolves the shared config path (`$XDG_CONFIG_HOME/apng-overlay.json` or `~/.config/...`).
 pub fn default_config_path() -> Result<PathBuf, ConfigError>
 {
-    let home = env::var_os("HOME")
-        .filter(|path| !path.is_empty())
-        .ok_or(ConfigError::DirectoryUnavailable)?;
-
-    Ok(PathBuf::from(home)
-        .join(".config")
-        .join("apng-overlay.json"))
+    let xdg = env::var_os("XDG_CONFIG_HOME");
+    let home = env::var_os("HOME");
+    config_path_from_env(xdg.as_deref(), home.as_deref())
 }
 
 /// Validates that a JSON value represents a finite non-boolean numeric value.

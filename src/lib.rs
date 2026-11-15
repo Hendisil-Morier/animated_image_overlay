@@ -34,3 +34,6 @@ pub mod playback;
 
 // Self-contained `wlr-layer-shell` + `wl_shm` Wayland overlay runtime and input handling.
 pub mod wayland;
+
+// Shared XDG Base Directory lookup with `$HOME` fallback across config and cache.
+pub(crate) mod xdg;

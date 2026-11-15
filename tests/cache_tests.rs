@@ -2,12 +2,16 @@
 //! temp-file cleanup on abort, and 128 MiB / custom-budget LRU RAM caching.
 
 use std::{
+    ffi::OsStr,
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use animated_image_widget::cache::{FrameCache, compute_cache_paths, prune_cache};
+use animated_image_widget::{
+    cache::{FrameCache, cache_dir_from_env, compute_cache_paths, prune_cache},
+    error::CacheError,
+};
 use image::{
     Delay, Frame as ImgFrame, ImageEncoder, RgbaImage,
     codecs::{gif::GifEncoder, png::PngEncoder},
@@ -230,4 +234,19 @@ fn cache_enforces_ram_lru_budget_and_decompresses_on_eviction()
 
     assert_eq!(store.ram_used_bytes(), 800);
     store.stop();
+}
+
+#[test]
+fn cache_dir_honors_xdg_override_and_home_fallback()
+{
+    let explicit = cache_dir_from_env(Some(OsStr::new("/xdg/cache")), Some(OsStr::new("/home/u")))
+        .expect("explicit XDG_CACHE_HOME should resolve");
+    assert_eq!(explicit, PathBuf::from("/xdg/cache/apng-overlay"));
+
+    let empty_xdg = cache_dir_from_env(Some(OsStr::new("")), Some(OsStr::new("/home/u")))
+        .expect("empty XDG_CACHE_HOME should fall back to HOME");
+    assert_eq!(empty_xdg, PathBuf::from("/home/u/.cache/apng-overlay"));
+
+    let missing = cache_dir_from_env(None, Some(OsStr::new("")));
+    assert!(matches!(missing, Err(CacheError::DirectoryUnavailable)));
 }

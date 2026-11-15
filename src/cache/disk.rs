@@ -1,8 +1,9 @@
 //! On-disk `.lraw`/`.json` cache layout, key hashing, metadata validation, and 30-day pruning.
 
-// Standard filesystem queries, hashing formatter, and wall-clock timestamps.
+// Standard filesystem queries, hashing formatter, OS environment strings, and timestamps.
 use std::{
     env,
+    ffi::OsStr,
     fmt::Write as _,
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
@@ -14,11 +15,12 @@ use serde::{Deserialize, Serialize};
 // Cryptographic digest for deterministic short cache filenames.
 use sha2::{Digest, Sha256};
 
-// Shared atomic writers, canonical key builder, and typed cache errors.
+// Shared atomic writers, canonical key builder, XDG helper, and typed cache errors.
 use crate::{
     atomic_fs,
     config::ConfigStore,
     error::{CacheError, OverlayError},
+    xdg,
 };
 
 /// Default age in days before unused cache artifacts are removed during startup pruning.
@@ -109,23 +111,23 @@ pub fn compute_cache_paths(
     })
 }
 
+/// Resolves the user cache root from explicit `XDG_CACHE_HOME` and `HOME` environment values.
+pub fn cache_dir_from_env(
+    xdg_cache_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Result<PathBuf, CacheError>
+{
+    xdg::base_dir(xdg_cache_home, home, ".cache")
+        .map(|root| root.join(CACHE_APP_DIR))
+        .ok_or(CacheError::DirectoryUnavailable)
+}
+
 /// Resolves the default user cache root (`$XDG_CACHE_HOME/apng-overlay` or `~/.cache/apng-overlay`).
 pub fn default_cache_dir() -> Result<PathBuf, CacheError>
 {
-    let cache_root = if let Some(xdg) = env::var_os("XDG_CACHE_HOME")
-        && !xdg.is_empty()
-    {
-        PathBuf::from(xdg)
-    }
-    else
-    {
-        let home = env::var_os("HOME")
-            .filter(|path| !path.is_empty())
-            .ok_or(CacheError::DirectoryUnavailable)?;
-        PathBuf::from(home).join(".cache")
-    };
-
-    Ok(cache_root.join(CACHE_APP_DIR))
+    let xdg = env::var_os("XDG_CACHE_HOME");
+    let home = env::var_os("HOME");
+    cache_dir_from_env(xdg.as_deref(), home.as_deref())
 }
 
 /// Removes cache files older than `max_age_days`, deleting `.json` markers before data blobs.

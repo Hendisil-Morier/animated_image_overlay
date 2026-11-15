@@ -17,8 +17,8 @@ pub mod store;
 
 // Disk cache path/metadata types, directory lookup, and 30-day pruning entry points.
 pub use disk::{
-    CacheMetadata, CachePaths, DEFAULT_PRUNE_AGE_DAYS, compute_cache_paths, default_cache_dir,
-    prune_cache,
+    CacheMetadata, CachePaths, DEFAULT_PRUNE_AGE_DAYS, cache_dir_from_env, compute_cache_paths,
+    default_cache_dir, prune_cache,
 };
 // RAM LRU budget constant and compositor wakeup hook type.
 pub use memory::{DEFAULT_RAM_CACHE_BUDGET_BYTES, WakeupCallback};

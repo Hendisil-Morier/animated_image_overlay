@@ -1,6 +1,7 @@
 //! Integration tests for locked JSON config persistence, atomic replacement, and field recovery.
 
 use std::{
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -9,8 +10,11 @@ use std::{
 };
 
 use animated_image_widget::{
-    config::{ConfigStore, DEFAULT_POS_X, DEFAULT_POS_Y, DEFAULT_SCALE, OverlayState},
-    error::OverlayError,
+    config::{
+        ConfigStore, DEFAULT_POS_X, DEFAULT_POS_Y, DEFAULT_SCALE, OverlayState,
+        config_path_from_env,
+    },
+    error::{ConfigError, OverlayError},
 };
 use serde_json::{Map, Value};
 
@@ -171,4 +175,32 @@ fn config_state_key_produces_normalized_absolute_path()
     assert!(Path::new(&key).is_absolute());
     assert!(key.ends_with("/sample.apng"));
     assert!(!key.contains(".."));
+}
+
+#[test]
+fn config_path_honors_xdg_override_and_home_fallback()
+{
+    let explicit = config_path_from_env(Some(OsStr::new("/xdg/cfg")), Some(OsStr::new("/home/u")))
+        .expect("explicit XDG_CONFIG_HOME should resolve");
+    assert_eq!(explicit, PathBuf::from("/xdg/cfg/apng-overlay.json"));
+
+    let empty_xdg = config_path_from_env(Some(OsStr::new("")), Some(OsStr::new("/home/u")))
+        .expect("empty XDG_CONFIG_HOME should fall back to HOME");
+    assert_eq!(
+        empty_xdg,
+        PathBuf::from("/home/u/.config/apng-overlay.json")
+    );
+
+    let unset_xdg = config_path_from_env(None, Some(OsStr::new("/home/u")))
+        .expect("unset XDG_CONFIG_HOME should fall back to HOME");
+    assert_eq!(
+        unset_xdg,
+        PathBuf::from("/home/u/.config/apng-overlay.json")
+    );
+
+    let missing_both = config_path_from_env(Some(OsStr::new("")), Some(OsStr::new("")));
+    assert!(matches!(
+        missing_both,
+        Err(ConfigError::DirectoryUnavailable)
+    ));
 }
