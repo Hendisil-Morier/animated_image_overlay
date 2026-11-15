@@ -81,7 +81,8 @@ impl ImageBufferRing
             .checked_mul(stride as usize)
             .ok_or_else(|| WaylandError::ShmPool(String::from("Frame buffer size overflow")))?;
 
-        let initial_bytes = frame_bytes.saturating_mul(2).max(4096);
+        // Pad slightly per slot so slot header/alignment never triggers an immediate 2x pool resize.
+        let initial_bytes = frame_bytes.saturating_add(4096).saturating_mul(2).max(4096);
         let mut pool = SlotPool::new(initial_bytes, shm).map_err(shm_pool_err)?;
 
         let mut buffers = Vec::with_capacity(MAX_FRAME_RING_SLOTS);
@@ -107,11 +108,11 @@ impl ImageBufferRing
         (self.frame_width as u32, self.frame_height as u32)
     }
 
-    /// Copies premultiplied `argb` pixels into a released slot and attaches it to `surface`.
-    pub(crate) fn upload_and_attach(
+    /// Acquires a released SHM slot, invokes `fill` with its writable canvas, and attaches to `surface`.
+    pub(crate) fn fill_and_attach(
         &mut self,
         surface: &WlSurface,
-        argb: &[u8],
+        fill: impl FnOnce(&mut [u8]) -> Result<(), OverlayError>,
     ) -> Result<(), OverlayError>
     {
         let slot_idx = self.acquire_free_slot_index()?;
@@ -121,20 +122,33 @@ impl ImageBufferRing
             WaylandError::ShmPool(String::from("Acquired SHM buffer slot unexpectedly locked"))
         })?;
 
-        if canvas.len() != argb.len()
-        {
-            return Err(WaylandError::ShmPool(format!(
-                "SHM slot byte length {} != frame byte length {}",
-                canvas.len(),
-                argb.len()
-            ))
-            .into());
-        }
-
-        canvas.copy_from_slice(argb);
+        fill(canvas)?;
         buffer.attach_to(surface).map_err(shm_pool_err)?;
         surface.damage_buffer(0, 0, self.frame_width, self.frame_height);
         Ok(())
+    }
+
+    /// Copies premultiplied `argb` pixels into a released slot and attaches it to `surface`.
+    pub(crate) fn upload_and_attach(
+        &mut self,
+        surface: &WlSurface,
+        argb: &[u8],
+    ) -> Result<(), OverlayError>
+    {
+        self.fill_and_attach(surface, |canvas| {
+            if canvas.len() != argb.len()
+            {
+                return Err(WaylandError::ShmPool(format!(
+                    "SHM slot byte length {} != frame byte length {}",
+                    canvas.len(),
+                    argb.len()
+                ))
+                .into());
+            }
+
+            canvas.copy_from_slice(argb);
+            Ok(())
+        })
     }
 
     /// Returns index of an inactive released buffer, growing up to `MAX_FRAME_RING_SLOTS` if needed.

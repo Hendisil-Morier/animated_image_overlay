@@ -87,13 +87,19 @@ fn pointer_drag_move_resize_scroll_and_middle_click_update_layout_and_save()
     assert!(moved.layout_changed);
     assert_eq!(layout.state().x, 250.0);
     assert_eq!(layout.state().y, 120.0);
-    assert!(input.on_button_release(BTN_LEFT).schedule_save);
+    let left_release = input.on_button_release(BTN_LEFT);
+    assert!(left_release.schedule_save);
+    assert!(!left_release.layout_changed);
 
-    // Right-drag scales preserving top-left corner.
+    // Right-drag scales preserving top-left corner; release marks layout updated for final resync.
     input.on_button_press(BTN_RIGHT, 1200, (400.0, 300.0), &layout);
+    assert!(input.is_resizing());
     input.on_pointer_motion((600.0, 300.0), &mut layout);
     assert!((layout.state().scale - 1.5).abs() < 1e-9);
-    assert!(input.on_button_release(BTN_RIGHT).schedule_save);
+    let right_release = input.on_button_release(BTN_RIGHT);
+    assert!(!input.is_resizing());
+    assert!(right_release.schedule_save);
+    assert!(right_release.layout_changed);
 
     // Scroll zooms and schedules save.
     let before_scroll = layout.state().scale;

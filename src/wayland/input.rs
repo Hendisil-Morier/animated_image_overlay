@@ -152,6 +152,12 @@ impl InputState
         !matches!(self.drag, DragMode::None)
     }
 
+    /// Returns `true` while a right-button resize drag is actively scaling the overlay.
+    pub fn is_resizing(&self) -> bool
+    {
+        matches!(self.drag, DragMode::Resize { .. })
+    }
+
     /// Determines desired pointer cursor shape at `pos` for UX clarity.
     pub fn desired_cursor(&self, pos: (f64, f64), layout: &OverlayLayout) -> PointerCursor
     {
@@ -304,10 +310,9 @@ impl InputState
     /// Ends active pointer drags and schedules debounced state persistence.
     pub fn on_button_release(&mut self, button: u32) -> InputEffects
     {
-        let was_dragging = matches!(
-            (button, self.drag),
-            (BTN_LEFT, DragMode::Move { .. }) | (BTN_RIGHT, DragMode::Resize { .. })
-        );
+        let ended_resize = button == BTN_RIGHT && matches!(self.drag, DragMode::Resize { .. });
+        let was_dragging =
+            ended_resize || (button == BTN_LEFT && matches!(self.drag, DragMode::Move { .. }));
 
         if !was_dragging
         {
@@ -316,6 +321,7 @@ impl InputState
 
         self.drag = DragMode::None;
         let mut effects = self.show_handle_effects();
+        effects.layout_changed = ended_resize;
         effects.schedule_save = true;
         effects
     }

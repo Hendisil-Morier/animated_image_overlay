@@ -599,24 +599,23 @@ fn rotate_argb8888_handles_chirality_and_transparent_apron_antialiasing()
         1, 0, 0, 255, 2, 0, 0, 255, // row 0
         3, 0, 0, 255, 4, 0, 0, 255, // row 1
     ];
-    let mut dst = Vec::new();
+    let mut dst_small = [0_u8; 16];
 
     // 90 deg CW unflipped -> [3, 1; 4, 2]
-    let dims = rotate_argb8888_into(&grid, 2, 2, 90.0, false, &mut dst).unwrap();
-    assert_eq!(dims, (2, 2));
+    rotate_argb8888_into(&grid, 2, 2, 90.0, false, 2, 2, &mut dst_small).unwrap();
     assert_eq!(
-        dst,
-        vec![
+        dst_small,
+        [
             3, 0, 0, 255, 1, 0, 0, 255, // row 0
             4, 0, 0, 255, 2, 0, 0, 255, // row 1
         ]
     );
 
     // 90 deg CW flipped horizontally -> [1, 3; 2, 4]
-    rotate_argb8888_into(&grid, 2, 2, 90.0, true, &mut dst).unwrap();
+    rotate_argb8888_into(&grid, 2, 2, 90.0, true, 2, 2, &mut dst_small).unwrap();
     assert_eq!(
-        dst,
-        vec![
+        dst_small,
+        [
             1, 0, 0, 255, 3, 0, 0, 255, // row 0
             2, 0, 0, 255, 4, 0, 0, 255, // row 1
         ]
@@ -624,20 +623,19 @@ fn rotate_argb8888_handles_chirality_and_transparent_apron_antialiasing()
 
     // 20x10 solid opaque colored block rotated 45 deg preserves center alpha=255 and valid premul edge alpha.
     let block = [25, 100, 200, 255].repeat(20 * 10);
-    let (rot_w, rot_h) = rotate_argb8888_into(&block, 20, 10, 45.0, false, &mut dst).unwrap();
-    assert_eq!((rot_w, rot_h), (22, 22));
-    assert_eq!(dst.len(), 22 * 22 * 4);
+    let mut dst_full = vec![0_u8; 22 * 22 * 4];
+    rotate_argb8888_into(&block, 20, 10, 45.0, false, 22, 22, &mut dst_full).unwrap();
 
     // Exterior corner lies strictly outside source box.
-    assert_eq!(&dst[0..4], &[0, 0, 0, 0]);
+    assert_eq!(&dst_full[0..4], &[0, 0, 0, 0]);
 
     // Center pixel remains solid opaque with exact source channels.
     let mid_off = (11 * 22 + 11) * 4;
-    assert_eq!(&dst[mid_off..mid_off + 4], &[25, 100, 200, 255]);
+    assert_eq!(&dst_full[mid_off..mid_off + 4], &[25, 100, 200, 255]);
 
     // Partial apron alpha exists along boundaries and every output pixel stays premultiplied-valid.
     let mut has_semitransparent = false;
-    for px in dst.as_chunks::<4>().0
+    for px in dst_full.as_chunks::<4>().0
     {
         let (b, g, r, a) = (px[0], px[1], px[2], px[3]);
         assert!(b <= a && g <= a && r <= a, "invalid premul pixel {px:?}");
@@ -647,4 +645,16 @@ fn rotate_argb8888_handles_chirality_and_transparent_apron_antialiasing()
         }
     }
     assert!(has_semitransparent);
+
+    // Scaled physical target (11x11) preserves centered foreground pixels and premultiplied edges.
+    let mut dst_half = vec![0_u8; 11 * 11 * 4];
+    rotate_argb8888_into(&block, 20, 10, 45.0, false, 11, 11, &mut dst_half).unwrap();
+    assert_eq!(&dst_half[0..4], &[0, 0, 0, 0]);
+    let half_mid = (5 * 11 + 5) * 4;
+    assert_eq!(&dst_half[half_mid..half_mid + 4], &[25, 100, 200, 255]);
+    for px in dst_half.as_chunks::<4>().0
+    {
+        let (b, g, r, a) = (px[0], px[1], px[2], px[3]);
+        assert!(b <= a && g <= a && r <= a, "invalid premul pixel {px:?}");
+    }
 }

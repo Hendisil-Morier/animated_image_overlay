@@ -214,6 +214,38 @@ impl OverlayRuntime
         }
     }
 
+    /// Resamples and atomically commits the current playback frame for updated orientation or scale.
+    pub(crate) fn refresh_active_oriented_frame(&mut self)
+    {
+        let Some(scene) = &mut self.scene
+        else
+        {
+            return;
+        };
+
+        let frame_idx = self.playback.current_index();
+        let refreshed = self
+            .cache
+            .with_frame_argb(frame_idx, |argb| {
+                scene.refresh_oriented_frame(
+                    &self.compositor,
+                    &self.shm,
+                    &self.layout,
+                    &self.input,
+                    argb,
+                )
+            })
+            .and_then(|inner| inner);
+        if let Err(err) = refreshed
+        {
+            tracing::warn!(
+                error = %err,
+                frame_index = frame_idx,
+                "Failed refreshing rotated Wayland frame"
+            );
+        }
+    }
+
     /// Cancels or schedules the `500 ms` debounced config save and `2000 ms` handle fade timer.
     pub(crate) fn apply_input_effects(&mut self, effects: InputEffects)
     {
@@ -228,33 +260,21 @@ impl OverlayRuntime
             tracing::debug!(editing, "Toggled edit mode");
         }
 
-        if let Some(scene) = &mut self.scene
+        let needs_redraw = effects.frame_redraw_needed
+            || (effects.layout_changed
+                && !self.input.is_resizing()
+                && self
+                    .scene
+                    .as_ref()
+                    .is_some_and(|scene| scene.needs_fractional_resync(&self.layout)));
+
+        if needs_redraw
         {
-            if effects.frame_redraw_needed
-            {
-                let frame_idx = self.playback.current_index();
-                let refreshed = self
-                    .cache
-                    .with_frame_argb(frame_idx, |argb| {
-                        scene.refresh_oriented_frame(
-                            &self.compositor,
-                            &self.shm,
-                            &self.layout,
-                            &self.input,
-                            argb,
-                        )
-                    })
-                    .and_then(|inner| inner);
-                if let Err(err) = refreshed
-                {
-                    tracing::warn!(
-                        error = %err,
-                        frame_index = frame_idx,
-                        "Failed refreshing rotated Wayland frame"
-                    );
-                }
-            }
-            else if effects.layout_changed || effects.edit_mode_changed.is_some()
+            self.refresh_active_oriented_frame();
+        }
+        else if let Some(scene) = &mut self.scene
+        {
+            if effects.layout_changed || effects.edit_mode_changed.is_some()
             {
                 if let Err(err) =
                     scene.sync_layout(&self.compositor, &self.shm, &self.layout, &self.input)

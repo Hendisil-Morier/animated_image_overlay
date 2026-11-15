@@ -210,38 +210,47 @@ fn sample_apron_pixel(src: &[u8], src_w: i64, src_h: i64, x: i64, y: i64)
     ]
 }
 
-/// Bilinearly resamples premultiplied `ARGB8888` frame `src` (`src_w x src_h`) into `dst` rotated
-/// visually clockwise by `angle_deg` and horizontally mirrored when `flipped`.
+/// Validates non-zero dimensions and exact byte length for an interleaved `ARGB8888` buffer.
+fn validate_argb_buffer(
+    role: &str,
+    width: u32,
+    height: u32,
+    byte_len: usize,
+) -> Result<(), CacheError>
+{
+    let expected = checked_argb_byte_len(width, height)?;
+    if width == 0 || height == 0 || byte_len != expected
+    {
+        return Err(CacheError::Decode {
+            path: PathBuf::from("<memory>"),
+            reason: format!("invalid {role} dimensions {width}x{height} for {byte_len} bytes"),
+        });
+    }
+    Ok(())
+}
+
+/// Bilinearly resamples premultiplied `ARGB8888` frame `src` (`src_w x src_h`) directly into
+/// caller-owned slice `dst` (`dst_w x dst_h`) rotated clockwise by `angle_deg` and mirrored
+/// horizontally when `flipped`.
 ///
-/// Resizes `dst` to match the output bounding box (`rotated_bounds(src_w, src_h, angle_deg)`) and
-/// uses a `1 px` transparent apron outside source bounds so edges anti-alias cleanly.
+/// Scales across the rotated bounding box `(dst_w, dst_h)` without intermediate heap allocations
+/// and uses a `1 px` transparent apron outside source bounds so borders anti-alias cleanly.
+#[expect(clippy::too_many_arguments)]
 pub fn rotate_argb8888_into(
     src: &[u8],
     src_w: u32,
     src_h: u32,
     angle_deg: f64,
     flipped: bool,
-    dst: &mut Vec<u8>,
-) -> Result<(u32, u32), CacheError>
+    dst_w: u32,
+    dst_h: u32,
+    dst: &mut [u8],
+) -> Result<(), CacheError>
 {
-    let expected_src_len = checked_argb_byte_len(src_w, src_h)?;
-    if src_w == 0 || src_h == 0 || src.len() != expected_src_len
-    {
-        return Err(CacheError::Decode {
-            path: PathBuf::from("<memory>"),
-            reason: format!(
-                "invalid source dimensions {}x{} for {} bytes",
-                src_w,
-                src_h,
-                src.len()
-            ),
-        });
-    }
+    validate_argb_buffer("source", src_w, src_h, src.len())?;
+    validate_argb_buffer("destination", dst_w, dst_h, dst.len())?;
 
-    let (dst_w, dst_h) = rotated_bounds(src_w, src_h, angle_deg);
-    let expected_dst_len = checked_argb_byte_len(dst_w, dst_h)?;
-    dst.resize(expected_dst_len, 0);
-
+    let (full_w, full_h) = rotated_bounds(src_w, src_h, angle_deg);
     let radians = normalized_angle_deg(angle_deg).to_radians();
     let cos_a = radians.cos();
     let sin_a = radians.sin();
@@ -249,22 +258,25 @@ pub fn rotate_argb8888_into(
 
     let src_cx = (f64::from(src_w) - 1.0) * 0.5;
     let src_cy = (f64::from(src_h) - 1.0) * 0.5;
-    let dst_cx = (f64::from(dst_w) - 1.0) * 0.5;
-    let dst_cy = (f64::from(dst_h) - 1.0) * 0.5;
+    let full_wf = f64::from(full_w);
+    let full_hf = f64::from(full_h);
+    let step_x = full_wf / f64::from(dst_w);
+    let step_y = full_hf / f64::from(dst_h);
 
     // Horizontal incremental step along output X in fixed-point source coordinates.
-    let step_x_du = (flip_sign * cos_a * ROTATE_STEP_SCALE).round() as i64;
-    let step_x_dv = (-flip_sign * sin_a * ROTATE_STEP_SCALE).round() as i64;
+    let step_x_du = (flip_sign * cos_a * step_x * ROTATE_STEP_SCALE).round() as i64;
+    let step_x_dv = (-flip_sign * sin_a * step_x * ROTATE_STEP_SCALE).round() as i64;
 
     let src_wi = i64::from(src_w);
     let src_hi = i64::from(src_h);
     let dst_stride = (dst_w as usize) * BYTES_PER_PIXEL;
+    let dx0 = 0.5 * step_x - 0.5 * full_wf;
 
     for (oy, row) in dst.chunks_exact_mut(dst_stride).enumerate()
     {
-        let dy = oy as f64 - dst_cy;
-        let row_sx0 = src_cx + (-dst_cx * flip_sign) * cos_a + dy * sin_a;
-        let row_sy0 = src_cy - (-dst_cx * flip_sign) * sin_a + dy * cos_a;
+        let dy = (oy as f64 + 0.5) * step_y - 0.5 * full_hf;
+        let row_sx0 = src_cx + (dx0 * flip_sign) * cos_a + dy * sin_a;
+        let row_sy0 = src_cy - (dx0 * flip_sign) * sin_a + dy * cos_a;
         let mut sx_fp = (row_sx0 * ROTATE_STEP_SCALE).round() as i64;
         let mut sy_fp = (row_sy0 * ROTATE_STEP_SCALE).round() as i64;
 
@@ -310,5 +322,5 @@ pub fn rotate_argb8888_into(
         }
     }
 
-    Ok((dst_w, dst_h))
+    Ok(())
 }

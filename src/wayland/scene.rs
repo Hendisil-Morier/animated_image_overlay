@@ -105,11 +105,8 @@ pub(crate) struct OverlayScene
     // Dedicated shared memory pool holding `parent_transparent_buf`.
     _parent_pool: SlotPool,
 
-    // Reusable frame ring backing `image_surface` at source or rotated pixel bounds.
+    // Reusable frame ring backing `image_surface` at source or scaled rotated bounds.
     frame_ring: ImageBufferRing,
-
-    // Reused scratch buffer holding CPU-resampled premultiplied `ARGB8888` pixels at fractional angles.
-    rotated_scratch: Vec<u8>,
 
     // Corner handle and edit-mode dashed border subsurfaces.
     chrome: OverlayChrome,
@@ -206,7 +203,6 @@ impl OverlayScene
             parent_transparent_buf,
             _parent_pool: parent_pool,
             frame_ring,
-            rotated_scratch: Vec::new(),
             chrome,
             screen_width: sw,
             screen_height: sh,
@@ -288,6 +284,44 @@ impl OverlayScene
         self.stage_oriented_buffer(shm, layout, frame_argb)
     }
 
+    /// Returns the desired SHM ring dimensions for `layout`, matching unrotated cache frames on
+    /// exact quarter turns and physical display resolution (`<= rotated_bounds`) at fractional angles.
+    pub(crate) fn oriented_target_size(&self, layout: &OverlayLayout) -> (u32, u32)
+    {
+        if layout.quarter_turn().is_some()
+        {
+            return layout.frame_size();
+        }
+
+        let (rot_w, rot_h) = layout.oriented_frame_size();
+        let (ov_w, ov_h) = layout.overlay_size();
+        let buf_scale = self.chrome.scale().max(1) as u32;
+        (
+            ov_w.saturating_mul(buf_scale).clamp(1, rot_w),
+            ov_h.saturating_mul(buf_scale).clamp(1, rot_h),
+        )
+    }
+
+    /// Reports when a fractional-angle SHM ring must grow for sharpness or shrink to reclaim RAM.
+    pub(crate) fn needs_fractional_resync(&self, layout: &OverlayLayout) -> bool
+    {
+        if layout.quarter_turn().is_some()
+        {
+            return false;
+        }
+
+        let (want_w, want_h) = self.oriented_target_size(layout);
+        let (cur_w, cur_h) = self.frame_ring.dimensions();
+        if want_w > cur_w || want_h > cur_h
+        {
+            return true;
+        }
+
+        let want_pixels = u64::from(want_w) * u64::from(want_h);
+        let cur_pixels = u64::from(cur_w) * u64::from(cur_h);
+        want_pixels * 3 <= cur_pixels * 2
+    }
+
     /// Re-uploads `frame_argb` for `layout` orientation and atomically commits buffer + layout changes.
     pub(crate) fn refresh_oriented_frame(
         &mut self,
@@ -303,8 +337,8 @@ impl OverlayScene
         Ok(())
     }
 
-    /// Selects unrotated hardware-transform pixels or CPU-resampled scratch pixels, ensures the SHM
-    /// frame ring dimensions match, and attaches the buffer onto `self.image_surface`.
+    /// Ensures the SHM frame ring matches `oriented_target_size(layout)` and renders or copies the
+    /// current frame straight into the active SHM slot attached to `self.image_surface`.
     fn stage_oriented_buffer(
         &mut self,
         shm: &Shm,
@@ -312,34 +346,21 @@ impl OverlayScene
         frame_argb: &[u8],
     ) -> Result<Option<ImageBufferRing>, OverlayError>
     {
-        let (frame_w, frame_h) = layout.frame_size();
-        let (target_w, target_h, pixels): (u32, u32, &[u8]) = if layout.quarter_turn().is_some()
-        {
-            (frame_w, frame_h, frame_argb)
-        }
-        else
-        {
-            let (rot_w, rot_h) = rotate_argb8888_into(
-                frame_argb,
-                frame_w,
-                frame_h,
-                layout.rotation(),
-                layout.flipped(),
-                &mut self.rotated_scratch,
-            )?;
-            (rot_w, rot_h, self.rotated_scratch.as_slice())
-        };
-
+        let (target_w, target_h) = self.oriented_target_size(layout);
         if self.frame_ring.dimensions() != (target_w, target_h)
         {
             let mut replacement = ImageBufferRing::new(shm, target_w, target_h)?;
-            replacement.upload_and_attach(&self.image_surface, pixels)?;
+            fill_ring_slot(&mut replacement, &self.image_surface, layout, frame_argb)?;
             let retired = std::mem::replace(&mut self.frame_ring, replacement);
             return Ok(Some(retired));
         }
 
-        self.frame_ring
-            .upload_and_attach(&self.image_surface, pixels)?;
+        fill_ring_slot(
+            &mut self.frame_ring,
+            &self.image_surface,
+            layout,
+            frame_argb,
+        )?;
         Ok(None)
     }
 
@@ -465,4 +486,34 @@ impl OverlayScene
     {
         self.chrome.sync_handle(layout.input_rect(false), input)
     }
+}
+
+/// Writes `frame_argb` directly into an SHM slot of `ring` (raw copy or fractional rotation).
+fn fill_ring_slot(
+    ring: &mut ImageBufferRing,
+    surface: &WlSurface,
+    layout: &OverlayLayout,
+    frame_argb: &[u8],
+) -> Result<(), OverlayError>
+{
+    if layout.quarter_turn().is_some()
+    {
+        return ring.upload_and_attach(surface, frame_argb);
+    }
+
+    let (frame_w, frame_h) = layout.frame_size();
+    let (dst_w, dst_h) = ring.dimensions();
+    ring.fill_and_attach(surface, |canvas| {
+        rotate_argb8888_into(
+            frame_argb,
+            frame_w,
+            frame_h,
+            layout.rotation(),
+            layout.flipped(),
+            dst_w,
+            dst_h,
+            canvas,
+        )
+        .map_err(OverlayError::from)
+    })
 }
