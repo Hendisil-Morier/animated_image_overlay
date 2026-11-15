@@ -8,16 +8,16 @@ Startup (`wayland::app::run_overlay` in `src/wayland/app.rs`) connects via `Conn
 
 ### Parent Surface and Subsurface Stack
 
-Moving a compact layer surface dynamically shifts the pointer coordinate origin while compositors apply margin updates asynchronously, producing runaway drag lag. To keep coordinates stable, `OverlayScene` (`src/wayland/scene.rs`, delegating buffer staging to `FrameStage` in `src/wayland/frame_stage.rs`) anchors one stationary fullscreen parent and moves desynchronized child subsurfaces within it:
+Moving a compact layer surface dynamically shifts the pointer coordinate origin while compositors apply margin updates asynchronously, producing runaway drag lag. To keep coordinates stable, `OverlayScene` (`src/wayland/scene.rs`, delegating buffer staging to `FrameStage` in `src/wayland/frame_stage.rs`) anchors one stationary fullscreen parent and moves child subsurfaces within it:
 
 ```text
 parent_layer (Layer::Overlay, namespace "apng-overlay", Anchor TOP|BOTTOM|LEFT|RIGHT, exclusive_zone -1)
   ├─ 1x1 transparent wl_shm buffer stretched to monitor size via parent_viewport (wp_viewporter)
   ├─ image_subsurface / image_surface (set_desync, empty input_region, place default)
   │    └─ ImageBufferRing (2..3 ARGB8888 slots), scaled via image_viewport + wl_surface::set_buffer_transform
-  ├─ handle_subsurface / handle_surface (place_above image_surface, set_desync, empty input_region)
+  ├─ handle_subsurface / handle_surface (place_above image_surface, sync, empty input_region)
   │    └─ 28x28 rounded pill at integer HiDPI buffer scale (3 pre-rendered opacity buffers)
-  └─ 4x OutlineEdge subsurfaces (place_below handle_surface, set_desync, empty input_region)
+  └─ 4x OutlineEdge subsurfaces (place_below handle_surface, sync, empty input_region)
        └─ 1 px dashed strips dynamically cropped via wp_viewport (mapped only in edit mode)
 ```
 
@@ -26,8 +26,8 @@ All child subsurfaces carry empty Wayland input regions so pointer focus and cur
 ### Orientation, HiDPI Chrome, and Mode Switching
 
 - **Quarter-Turn Transform Mapping (`wl_transform_for_orientation`):** Wayland compositor `set_buffer_transform` displays the inverse of `wl_output::Transform` (applying horizontal flip around the vertical axis before counter-clockwise rotation), so clockwise visual `(rotation, flipped)` pairs map via `inverse(R_ccw * F) = F * R_cw` onto `Transform::{Normal, _90, _180, _270, Flipped, Flipped90, Flipped180, Flipped270}` when `image_surface.version() >= 2`. Fractional angles use `Transform::Normal` with rotated buffers rendered by `decode::rotate_argb8888_into`.
-- **Corner Handle and Edit Borders (`src/wayland/chrome.rs`, `src/wayland/chrome_raster.rs`):** `HandleBuffers` pre-renders three premultiplied white pill textures (`HANDLE_SIZE = 28`, `HANDLE_CORNER_RADIUS = 8`) in one `SlotPool` sized for the compositor's integer buffer scale (`scale_factor_changed`): `HANDLE_FADED_ALPHA = 38` (`~15%` opacity after `HANDLE_FADE_MS = 2000`), `HANDLE_IDLE_ALPHA = 64` (`~25%`), and `HANDLE_HOVER_ALPHA = 217` (`~85%`). Edit borders pre-render four `1 px` dashed strips (`OUTLINE_DASH_PERIOD = 12`, `OUTLINE_ALPHA = 140`) up to monitor dimensions via `chrome_raster.rs` and crop them per layout sync with `wp_viewport` (`ChromeGeometry::edge_viewport_crop`), growing and re-allocating the chrome pool if screen bounds expand (`needs_chrome_rebuild`).
-- **Passive vs Edit Input (`OverlayScene::sync_layout_inner`):** Delegates viewport sizing (`sync_parent_viewport`), image transforms and viewport destination (`sync_image_surface_state`), and mode switching (`sync_interactivity_and_input_region`). Passive mode sets `KeyboardInteractivity::None` and restricts `parent_layer` input to `layout.input_rect(false)` (the `28x28` bottom-right handle). Edit mode switches to `KeyboardInteractivity::OnDemand` and expands `parent_layer` input to `layout.input_rect(true)` (`overlay_rect()`).
+- **Corner Handle and Edit Borders (`src/wayland/chrome.rs`, `src/wayland/chrome_raster.rs`):** `HandleBuffers` pre-renders three premultiplied white pill textures (`HANDLE_SIZE = 28`, `HANDLE_CORNER_RADIUS = 8`) in one `SlotPool` sized for the compositor's integer buffer scale (`scale_factor_changed`): `HANDLE_FADED_ALPHA = 38` (`~15%` opacity after `HANDLE_FADE_MS = 2000`), `HANDLE_IDLE_ALPHA = 64` (`~25%`), and `HANDLE_HOVER_ALPHA = 217` (`~85%`). Edit borders pre-render four `1 px` dashed strips (`OUTLINE_DASH_PERIOD = 12`, `OUTLINE_ALPHA = 140`) up to monitor dimensions via `chrome_raster.rs` and crop them per layout sync with `wp_viewport` (`ChromeGeometry::edge_viewport_crop`), growing and re-allocating the chrome pool if screen bounds expand (`needs_chrome_rebuild`). Both handle and edge chrome subsurfaces stay synchronized (`sync`) and cache their last committed placement/appearance so redundant attaches, viewport updates, and hidden-edge detach commits are skipped.
+- **Passive vs Edit Input (`OverlayScene::sync_layout_inner`):** Delegates viewport sizing (`sync_parent_viewport`), image transforms and viewport destination (`prepare_image_surface_state`), and mode switching (`sync_interactivity_and_input_region`). `sync_layout_inner` commits `parent_layer` before `image_surface`, and `prepare_image_surface_state` emits `1x1` buffer damage so pure position moves commit `image_surface` cleanly. Passive mode sets `KeyboardInteractivity::None` and restricts `parent_layer` input to `layout.input_rect(false)` (the `28x28` bottom-right handle). Edit mode switches to `KeyboardInteractivity::OnDemand` and expands `parent_layer` input to `layout.input_rect(true)` (`overlay_rect()`).
 
 ## 2. Disk Cache Wire Format (`v2-lraw-argb8888`) and Decode Pipeline
 
@@ -52,19 +52,19 @@ Sibling `<digest>.json` stores `CacheMetadata`:
 {
   "w": 500,
   "h": 723,
-  "delays": [33, 33, ...],
+  "delays_us": [33000, 33000, ...],
   "sizes": [418210, 419004, ...]
 }
 ```
 
-- `delays` holds per-frame display durations in milliseconds clamped to `MIN_FRAME_DELAY_MS = 10` (`DEFAULT_FRAME_DELAY_MS = 33` when metadata omits timing).
+- `delays_us` holds per-frame display durations in microseconds clamped to `MIN_FRAME_DELAY_US = 10_000` (`DEFAULT_FRAME_DELAY_US = 33_000` when metadata omits timing).
 - `sizes` lists exact byte lengths of each sequential chunk inside `.lraw`, reconstructed by `build_chunk_spans` (`src/cache/reader.rs`) into `ChunkSpan { offset, len }` for seek-free `FileExt::read_exact_at` (`pread`) reads inside `LrawReader`.
 
 ### Crash Safety, Validation, and Pruning
 
 1. **Single-Open Streaming Decode (`src/decode/codecs.rs`, `src/decode/stream.rs`, `src/cache/sink.rs`):** Cold launches open the source container once (`OpenedSource` across APNG, static PNG, GIF, WebP, and stills). Frame 0 decodes synchronously on startup so the widget renders immediately while a worker thread (`aiw-decoder`) streams batches of `DECODE_BATCH_SIZE = 4` into `SharedFrames` and pings `calloop`.
 2. **Atomic Commit Ordering (`src/atomic_fs.rs`, `src/cache/sink.rs`):** `DecodeCacheSink` writes compressed chunks into a sibling temporary file (`.tmp-<pid>-<seq>.lraw` opened via `O_EXCL`). If cancelled or errored, `AtomicTempFile::drop` unlinks the incomplete temporary blob. Only after `.lraw` commits via `fs::rename` does `write_cache_metadata` atomically write `<digest>.json`.
-3. **Warm Validation Fallback (`src/cache/disk.rs`, `src/cache/reader.rs`):** On cache hits, `try_open_cached_store` validates non-zero `(w, h)`, non-empty matching `delays`/`sizes` lengths, non-zero chunk sizes, sufficient `.lraw` length, and frame 0 LZ4 decompression via `read_verified_frame0`. Invalid caches log a warning and fall back to decoding cleanly from source.
+3. **Warm Validation Fallback (`src/cache/disk.rs`, `src/cache/reader.rs`):** On cache hits, `try_open_cached_store` validates non-zero `(w, h)`, non-empty matching `delays_us`/`sizes` lengths, non-zero chunk sizes, sufficient `.lraw` length, and frame 0 LZ4 decompression via `read_verified_frame0`. Invalid caches log a warning and fall back to decoding cleanly from source.
 4. **Timestamp Refresh and 30-Day Pruning:** Valid cache opens refresh both `.json` and `.lraw` mtimes (`touch_modified`). Both startup cache hits and completed cold decodes run `prune_cache` (`DEFAULT_PRUNE_AGE_DAYS = 30`), sorting `.json` markers before `.lraw`, `.zraw`, and `.raw` payloads when unlinking expired entries so orphaned blobs never appear valid.
 
 ## 3. Persistent Config Schema (`apng-overlay.json`)
@@ -109,5 +109,5 @@ Pointer drags, wheel/keyboard scaling, rotation, and flips mark `dirty_save = tr
 ## 4. Event Loop, Playback Clock, and Diagnostics
 
 - **Event Loop (`src/wayland/app.rs`, `src/wayland/runtime.rs`):** `prepare_signals` masks `SIGINT` and `SIGTERM` in `main()` before spawning logging or decoder worker threads so signal delivery hits `calloop::signals::Signals` deterministically. The loop coordinates `WaylandSource`, background decode wakeups (`make_ping`), animation wait timers, `SAVE_DEBOUNCE_MS` (`500 ms`), `HANDLE_FADE_MS` (`2000 ms`), and `FRAME_ERROR_RETRY_MS` (`100 ms`) recovery retries after transient SHM/cache staging failures.
-- **Playback Clock (`src/playback.rs`):** `PlaybackClock` maintains monotonic millisecond deadlines (`next_deadline_ms`), holds on the final buffered frame while `!decode_done`, stops Wayland callbacks on static or paused images, and rebases stale deadlines if elapsed drift exceeds `STALL_RECOVERY_MS = 1000.0` (e.g. after system suspend) instead of spinning catch-up frames.
+- **Playback Clock (`src/playback.rs`):** `PlaybackClock` maintains monotonic microsecond deadlines (`next_deadline_us`), holds on the final buffered frame while `!decode_done`, stops Wayland callbacks on static or paused images, and rebases stale deadlines if elapsed drift exceeds `STALL_RECOVERY_US = 1_000_000.0` (e.g. after system suspend) instead of spinning catch-up frames.
 - **Dual-Output Diagnostics (`src/logging.rs`):** `build_subscriber_in_dir` writes `DEBUG`-level records through a non-blocking `RollingFileAppender` (`Rotation::DAILY`, `apng-overlay.*.log`, `max_log_files(7)`) under `$XDG_CACHE_HOME/apng-overlay/logs/`, mirrors `DEBUG` output to stdout when `--debug` or truthy `OVERLAY_DEBUG` is active, and flushes pending buffers both in `main()` shutdown (`LoggingGuard::flush`) and in a chained panic hook (`install_panic_flush_hook`).

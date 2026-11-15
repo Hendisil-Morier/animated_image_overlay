@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Changed
+- Upgraded frame timing, `.json` cache metadata (`delays_us`), `PlaybackClock`, and `calloop` frame wait timers from millisecond to microsecond precision (`16_667 us` for `1/60`s APNG/WebP frames).
+- Coalesced scene and pointer cursor synchronization once per `wl_pointer.frame` batch (`PointerHandler::pointer_frame`, `InputEffects::merge_scene_flags`, `OverlayRuntime::apply_immediate_effects`), skipped redundant `WlRegion` input-region updates when `input_rect` is unchanged, switched corner handle and edit outline subsurfaces to synchronized commits with cached placement/appearance diffing (`OverlayChrome::hide_outline`, `OutlineEdge::apply_placement`), and committed `parent_layer` before `image_surface` in `OverlayScene::sync_layout_inner`.
+
+### Fixed
+- Emitted minimal `1x1` buffer damage and committed `image_surface` when `image_subsurface.set_position` changes without a simultaneous scale, viewport, transform, or frame change (`OverlayScene::prepare_image_surface_state`), preventing pure Move drags from waiting for the animation timer cadence to repaint `image_surface` on compositors such as `niri`.
+
 ## [0.3.1] - 2026-11-15
 
 ### Changed
