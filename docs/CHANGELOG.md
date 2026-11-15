@@ -10,6 +10,8 @@ All notable changes to this project are documented here.
 
 ### Changed
 - Generalized `OverlayState::rotation` and `OverlayLayout::rotation` from discrete quarter-turn variants to normalized finite `f64` degrees in `[0.0, 360.0)` while preserving zero-copy Wayland `wl_surface::set_buffer_transform` fast paths on snapped 90-degree multiples.
+- Resampled arbitrary-angle frames straight into physical-display-sized shared-memory ring slots via `decode::rotate_argb8888_into` and `ImageBufferRing::fill_and_attach` rather than keeping an intermediate `rotated_scratch` heap buffer.
+- Deferred fractional SHM ring resizes during pointer resize drags until button release (`InputState::is_resizing`) while resyncing physical buffer density when compositor `scale_factor_changed` fires (`OverlayScene::needs_fractional_resync`).
 
 ## [0.2.2] - 2026-11-15
 
