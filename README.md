@@ -1,17 +1,24 @@
 # Animated Image Overlay
 
-Transparent, click-through desktop widget for playing animated images (such as APNG or GIF) above all windows on Wayland using GTK 4 and `gtk4-layer-shell`.
+Self-contained transparent, click-through Wayland desktop widget for playing animated and static images (APNG, GIF, animated WebP, PNG, and other formats) above all windows using `wlr-layer-shell` directly over `wl_shm` without GTK or Python runtime dependencies.
 
 ## Requirements
 
-- Python 3 with `PyGObject` (`gi`), `pycairo`, and `Pillow`
-- `gtk4-layer-shell` (`libgtk4-layer-shell.so` or `.so.0`)
-- A `wlroots`-compatible Wayland compositor (not supported on X11 or GNOME Shell)
+- A Wayland compositor supporting `zwlr_layer_shell_v1`, `wl_subcompositor`, `wl_shm`, and `wp_viewporter` (such as Sway, Hyprland, River, or KDE KWin; not supported on X11 or GNOME Shell)
+- Rust toolchain (stable or nightly for `rustfmt`) and a C toolchain for building the bundled `webp-animation` codec
 
-## Usage
+## Build and Usage
+
+Build the optimized release binary:
 
 ```bash
-python overlay.py FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE]
+cargo build --release
+```
+
+Run the overlay:
+
+```bash
+./target/release/animated_image_widget FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE]
 ```
 
 Options:
@@ -21,34 +28,57 @@ Options:
 - `-m`, `--monitor`: Target monitor index or connector name such as `DP-1` (default: `0`).
 - `-s`, `--scale`: Initial display scale, overriding any saved scale for that file.
 
-Set `OVERLAY_DEBUG=1` to print timestamped startup, cache, layout, and save logs.
+Set `OVERLAY_DEBUG=1` to mirror debug diagnostics to stdout alongside the rolling daily log files in `~/.cache/apng-overlay/logs/`.
 
 ## Controls
 
-The overlay keeps a 28 px handle in the bottom-right corner that fades out after 2 seconds of inactivity and returns on hover. Only the handle accepts pointer input by default, passing clicks on the rest of the image through to windows underneath.
+By default, only a `28x28 px` handle in the bottom-right corner accepts pointer input while the rest of the image passes clicks through to windows underneath (`KeyboardInteractivity::None`). The handle fades out after 2 seconds of inactivity and reappears on hover or drag.
 
+Pointer controls:
 - **Left-drag**: Move the overlay.
-- **Right-drag**: Resize from the top-left corner toward the bottom-right.
-- **Scroll wheel**: Scale up or down.
+- **Right-drag**: Resize anchored from the top-left corner toward the bottom-right.
+- **Scroll wheel**: Scale up or down continuously.
+- **Triple-click (left button, 400 ms / 4 px)**: Toggle edit mode on the corner handle (or anywhere on the overlay while editing), expanding pointer input to the full overlay with a 1 px dashed outline and enabling keyboard shortcuts (`KeyboardInteractivity::OnDemand`).
 - **Middle-click on handle**: Quit cleanly.
-- **`SIGUSR1`**: Toggle edit mode so the entire image accepts drag and scroll input (shown with a dashed outline).
-- **`SIGINT` / `SIGTERM`**: Flush pending config saves, stop background decoding, and quit.
 
-## Configuration and Cache
+Edit-mode keyboard shortcuts:
+- `Esc` (or triple-click): Exit edit mode back to passive click-through playback.
+- `q`: Quit cleanly.
+- Arrow keys or `h` / `j` / `k` / `l`: Nudge position by `10 px`.
+- `+` / `=` / `-`: Step scale up or down.
+- `Space`: Pause or resume animation playback.
 
-- `~/.config/apng-overlay.json`: Stores `x`, `y`, and `scale` per absolute file path using debounced (500 ms) atomic writes.
-- `~/.cache/apng-overlay/`: Stores `zlib`-compressed frame data (`.zraw`) and metadata (`.json`). Frame 0 displays right away while remaining frames stream or decode in a background thread, and active cache entries refresh on use while stale files older than 30 days are pruned automatically.
+Signals:
+- **`SIGINT` / `SIGTERM`**: Flush pending debounced config writes, abort active background decoders cleanly, flush logs, and exit with status `0`.
+
+## Configuration, Cache, and Logs
+
+- `~/.config/apng-overlay.json`: Stores `x`, `y`, and `scale` per canonical absolute file path using 500 ms debounced writes guarded by an exclusive `flock` on `~/.config/apng-overlay.json.lock` and atomic temp-file replacement.
+- `~/.cache/apng-overlay/`: Stores `lz4_flex`-compressed premultiplied `ARGB8888` chunks (`.lraw`) and `.json` metadata written strictly after `.lraw`. Frame 0 displays immediately while remaining frames stream in the background. Active cache entries refresh timestamps on hits, entries older than 30 days (`.json`, `.raw`, `.zraw`, `.lraw`) are pruned automatically at startup, and uncompressed frames remain cached in RAM up to a 128 MiB LRU budget.
+- `~/.cache/apng-overlay/logs/`: Daily rotating log files (`apng-overlay.*.log`, retaining up to 7 files).
 
 ## Structure and Tests
 
-- `overlay.py`: CLI argument parsing and entry point.
-- `config.py`: Debug logging and atomic JSON state persistence.
-- `cache.py`: Pillow decoding, `.zraw` disk cache, 30-day pruning, and bounded LRU `Gdk.MemoryTexture` cache.
-- `window.py`: `libgtk4-layer-shell` preload, Wayland overlay window, pointer/signal input, and `Gdk.FrameClock` playback.
-- `tests/test_overlay.py`: Unit tests for CLI validation, config persistence, monitor resolution, clamping, cache fallback/pruning, and tick timing.
+Rust crate modules under `src/`:
+- `src/main.rs` & `src/cli.rs`: Signal masking setup, `clap` CLI validation, and runtime entry point.
+- `src/logging.rs`: Dual-output `tracing` setup with panic flush hook.
+- `src/error.rs` & `src/atomic_fs.rs`: Typed `thiserror` errors and RAII atomic temp-file writers.
+- `src/config.rs`: `flock`-serialized JSON config persistence and corruption recovery.
+- `src/layout.rs` & `src/playback.rs`: Pure monitor-clamped geometry calculations and drift/stall-resilient frame clock.
+- `src/decode/`: Streaming APNG, GIF, animated WebP, and static decoding (`codecs.rs`, `pixel.rs`, `stream.rs`).
+- `src/cache/`: Deterministic `.lraw`/`.json` disk storage and 30-day pruning (`disk.rs`), 128 MiB RAM LRU store (`memory.rs`), warm chunk reader (`reader.rs`), decode writer (`sink.rs`), and `FrameCache` facade (`store.rs`).
+- `src/wayland/`: `calloop` event-loop bootstrap (`app.rs`), runtime timer/state coordination (`runtime.rs`), Wayland protocol dispatch (`handlers.rs`), layer-shell/subsurface scene (`scene.rs`), corner handle and dashed border chrome (`chrome.rs`), `SlotPool` frame ring (`shm_ring.rs`), monitor lookup (`monitor.rs`), pointer state (`input.rs`), and triple-click/shortcut mapping (`shortcuts.rs`).
 
-Run the unit tests with:
+Run formatting, linting, and Rust integration tests (all under `tests/`):
 
 ```bash
-python3 -B -m unittest discover -s tests -v
+cargo +nightly fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+The original Python + GTK 4 implementation and its test suite remain archived under `python_scripts/` for reference and comparison:
+
+```bash
+python3 -B -m unittest discover -s python_scripts/tests -v
 ```

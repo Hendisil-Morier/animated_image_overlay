@@ -2,7 +2,25 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased] - 2026-11-15
+## [0.1.0] - 2026-11-15 (Rust Wayland Rewrite)
+
+### Added
+- Rewrote the overlay as a self-contained Rust binary (`animated_image_widget`, edition `2024`, `unsafe_code = "forbid"`) targeting `zwlr_layer_shell_v1`, `wl_subcompositor`, `wl_shm`, and `wp_viewporter` directly via `smithay-client-toolkit` and `calloop`.
+- Added streaming decode support (`src/decode/`) for APNG, GIF, animated WebP (`webp-animation`), and static formats with `fast_image_resize` Lanczos3 downscaling and premultiplied `ARGB8888` conversion.
+- Added LZ4 `.lraw` + `.json` cache (`src/cache/`) with atomic `.tmp-*` staging, 30-day pruning (`.json`, `.raw`, `.zraw`, `.lraw`), and a 128 MiB uncompressed RAM LRU cache.
+- Decomposed decoder (`codecs`, `pixel`, `stream`), cache (`disk`, `memory`, `reader`, `sink`, `store`), and Wayland frontend (`app`, `runtime`, `handlers`, `scene`, `chrome`, `shm_ring`, `monitor`, `input`, `shortcuts`) into single-responsibility modules.
+- Added triple-click edit mode toggling (`400 ms` / `4 px` threshold), `1 px` dashed viewport-cropped edit border, `KeyboardInteractivity::OnDemand` edit shortcuts (`Esc`, `q`, arrows/`hjkl`, `+`/`=`/`-`, `Space`), `28x28` auto-fading corner handle, and integration test suites under `tests/` (34 tests).
+- Masked `SIGINT`/`SIGTERM` via `calloop::signals::Signals` in `main()` before spawning logging or decoder worker threads so signal delivery deterministically triggers cleanup, config flush, and exit status `0`.
+- Archived the legacy Python + GTK 4 implementation and its 13 unit tests under `python_scripts/`.
+
+### Benchmark Comparison (`~/Pictures/M_Animation.apng`, `500x723`, 180 frames, KDE KWin `eDP-1`)
+- **Steady-state `VmRSS`:** `186,628 kB` vs Python `216,404 kB` (`-29,776 kB` / `-13.8%`; peak `VmHWM`: `190,512 kB`).
+- **Steady-state `Pss`:** `182,228 kB` (`Pss_File: 3,676 kB`, `Pss_Anon: 177,124 kB` retaining the 128 MiB uncompressed LRU frame cache plus 35.4 MiB LZ4 frame store) vs Python `136,587 kB` (shared GTK4/Cairo `.so` pages).
+- **10s Steady-State CPU (`perf stat`):** `1,061,937,340` `cpu_core/cycles/` (`96.51%`, vs Python `6.59B` `cpu_core` cycles, `-83.9%`) plus `1,070,253,341` `cpu_atom/cycles/` (`3.49%`).
+- **Disk Cache Size:** `37,084,879` bytes (`35.4 MiB`) `.lraw` + `.json` vs Python `~98 MB` `.zraw`.
+- **Startup & Decode:** `15 ms` warm startup to event loop; `126 ms` cold startup to frame 0 loop entry (`3.25 s` full 180-frame background decode); steady `2` open `memfd` FDs during 10s playback (`11,372 kB` `VmRSS` / `8,655 kB` `Pss` on static PNG).
+
+## [Unreleased] - 2026-11-15 (Python Baseline)
 
 ### Added
 - Split the single-file script into `overlay.py`, `config.py`, `cache.py`, and `window.py`, backed by unit tests in `tests/test_overlay.py`.
@@ -21,6 +39,8 @@ All notable changes to this project are documented here.
 - Added `Gio.ApplicationFlags.NON_UNIQUE` so launching a second overlay opens that file independently instead of duplicating the first window.
 - Added fail-fast exits when `LayerShell.is_supported()` is false, the target monitor is missing, or `on_activate` raises an exception.
 - Added corrupt-cache fallback to re-decode from source instead of crashing, and joined active decode workers on exit to clean up temporary `.tmp-*.zraw` files.
+- Serialized `save_state_entry` in `config.py` using an exclusive `fcntl.flock` on `f"{CONFIG_PATH}.lock"` across read, merge, and `atomic_write_json`, preventing concurrent `NON_UNIQUE` overlay instances from overwriting one another's updates across `os.replace`.
+- Updated single-frame caching in `FrameStore.prepare_first_frame` (`cache.py`) to atomically write `.zraw` data via `atomic_write_bytes` before committing `.json` metadata via shared `_write_cache_meta`, matching `_decode_remaining_frames` and verified by new tests in `tests/test_overlay.py`.
 
 ## Prehistory (Pre-Git)
 
