@@ -5,7 +5,7 @@ use animated_image_widget::{
     layout::OverlayLayout,
     wayland::{
         display_cache::{DisplayCacheKey, DisplayFrameCache, angle_key},
-        frame_stage::{BufferTargetSpec, compute_buffer_target_spec},
+        frame_stage::{BufferTargetSpec, compute_buffer_target_spec, ring_needs_resync},
     },
 };
 
@@ -166,4 +166,70 @@ fn compute_buffer_target_spec_selects_static_downscale_and_adr001_tiers()
             cache_key: Some(make_key(expected_side, expected_side, 45.0, true)),
         }
     );
+}
+
+#[test]
+fn ring_needs_resync_triggers_on_screen_shrink_past_hysteresis_and_growth()
+{
+    let display_cache = DisplayFrameCache::new(64 * 1024 * 1024);
+
+    // 1. Fractional-angle animated overlay shrinking across the 2/3 pixel hysteresis boundary.
+    let mut rotated = OverlayLayout::new(
+        1000,
+        800,
+        1920,
+        1080,
+        OverlayState {
+            x: 0.0,
+            y: 0.0,
+            scale: 0.7,
+            rotation: 310.0,
+            flipped: false,
+        },
+    );
+    let initial_spec = compute_buffer_target_spec(&rotated, &display_cache, 1, 10, true, false);
+    let initial_ring = (initial_spec.width, initial_spec.height);
+    assert!(!ring_needs_resync(initial_ring, initial_ring));
+
+    // Gentle screen shrink stays above 2/3 pixels and avoids unnecessary SHM reallocation.
+    rotated.set_screen_size(1920, 820);
+    let gentle_spec = compute_buffer_target_spec(&rotated, &display_cache, 1, 10, true, false);
+    assert!(!ring_needs_resync(
+        (gentle_spec.width, gentle_spec.height),
+        initial_ring
+    ));
+
+    // Steep monitor shrink crosses <= 2/3 pixel threshold and requires SHM buffer resync.
+    rotated.set_screen_size(1280, 500);
+    let shrunk_spec = compute_buffer_target_spec(&rotated, &display_cache, 1, 10, true, false);
+    let shrunk_ring = (shrunk_spec.width, shrunk_spec.height);
+    assert!(ring_needs_resync(shrunk_ring, initial_ring));
+
+    // Growing beyond the shrunk ring triggers resync for sharpness.
+    assert!(ring_needs_resync(initial_ring, shrunk_ring));
+
+    // 2. Static downscaled single-frame overlay also resyncs when compositor configure shrinks screen.
+    let mut static_layout = OverlayLayout::new(
+        2000,
+        1000,
+        2560,
+        1440,
+        OverlayState {
+            x: 0.0,
+            y: 0.0,
+            scale: 1.0,
+            rotation: 0.0,
+            flipped: false,
+        },
+    );
+    let static_initial =
+        compute_buffer_target_spec(&static_layout, &display_cache, 1, 1, true, true);
+    static_layout.set_screen_size(1000, 600);
+    let static_shrunk =
+        compute_buffer_target_spec(&static_layout, &display_cache, 1, 1, true, true);
+    assert!(static_shrunk.cache_key.is_none());
+    assert!(ring_needs_resync(
+        (static_shrunk.width, static_shrunk.height),
+        (static_initial.width, static_initial.height)
+    ));
 }

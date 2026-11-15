@@ -188,6 +188,14 @@ impl LayerShellHandler for OverlayRuntime
             self.apply_input_effects(initial_timer);
             self.schedule_playback_if_needed();
         }
+        else if !self.input.is_resizing()
+            && self
+                .scene
+                .as_ref()
+                .is_some_and(|scene| scene.needs_buffer_resync(&self.layout, &self.cache))
+        {
+            self.refresh_active_oriented_frame();
+        }
         else if let Some(scene) = &mut self.scene
             && let Err(err) =
                 scene.sync_layout(&self.compositor, &self.shm, &self.layout, &self.input)
