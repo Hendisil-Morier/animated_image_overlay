@@ -7,11 +7,40 @@ use smithay_client_toolkit::shm::{
 };
 use wayland_client::protocol::{wl_shm, wl_surface::WlSurface};
 
-// Typed overlay and Wayland SHM errors.
-use crate::error::{OverlayError, WaylandError};
+// Typed overlay errors, Wayland SHM errors, and 4-byte ARGB pixel size.
+use crate::{
+    decode::BYTES_PER_PIXEL,
+    error::{OverlayError, WaylandError},
+};
 
 // Maximum concurrent SHM buffers maintained in the image frame ring.
 const MAX_FRAME_RING_SLOTS: usize = 3;
+
+/// Formats a shared-memory or Wayland pool/region failure cleanly as `WaylandError::ShmPool`.
+pub(crate) fn shm_pool_err(err: impl ToString) -> WaylandError
+{
+    WaylandError::ShmPool(err.to_string())
+}
+
+/// Computes `width * BYTES_PER_PIXEL` cleanly, failing on `i32` overflow.
+pub(crate) fn checked_argb_stride(width: i32) -> Result<i32, WaylandError>
+{
+    width
+        .checked_mul(BYTES_PER_PIXEL as i32)
+        .ok_or_else(|| WaylandError::ShmPool(String::from("Frame stride overflow")))
+}
+
+/// Allocates one `wl_shm::Format::Argb8888` slot buffer in `pool` using standard 4-byte stride.
+pub(crate) fn create_argb_buffer(
+    pool: &mut SlotPool,
+    width: i32,
+    height: i32,
+) -> Result<(Buffer, &mut [u8]), WaylandError>
+{
+    let stride = checked_argb_stride(width)?;
+    pool.create_buffer(width, height, stride, wl_shm::Format::Argb8888)
+        .map_err(shm_pool_err)
+}
 
 /// Reusable double/triple-buffered `SlotPool` holding frame-sized `ARGB8888` `wl_shm` slots.
 pub(crate) struct ImageBufferRing
@@ -47,23 +76,18 @@ impl ImageBufferRing
         let fh = i32::try_from(frame_height.max(1)).map_err(|_| {
             WaylandError::ShmPool(format!("Frame height exceeds i32: {frame_height}"))
         })?;
-        let stride = fw
-            .checked_mul(4)
-            .ok_or_else(|| WaylandError::ShmPool(String::from("Frame stride overflow")))?;
+        let stride = checked_argb_stride(fw)?;
         let frame_bytes = (fh as usize)
             .checked_mul(stride as usize)
             .ok_or_else(|| WaylandError::ShmPool(String::from("Frame buffer size overflow")))?;
 
         let initial_bytes = frame_bytes.saturating_mul(2).max(4096);
-        let mut pool = SlotPool::new(initial_bytes, shm)
-            .map_err(|err| WaylandError::ShmPool(err.to_string()))?;
+        let mut pool = SlotPool::new(initial_bytes, shm).map_err(shm_pool_err)?;
 
         let mut buffers = Vec::with_capacity(MAX_FRAME_RING_SLOTS);
         for _ in 0..2
         {
-            let (buffer, _) = pool
-                .create_buffer(fw, fh, stride, wl_shm::Format::Argb8888)
-                .map_err(|err| WaylandError::ShmPool(err.to_string()))?;
+            let (buffer, _) = create_argb_buffer(&mut pool, fw, fh)?;
             buffers.push(buffer);
         }
 
@@ -102,9 +126,7 @@ impl ImageBufferRing
         }
 
         canvas.copy_from_slice(argb);
-        buffer
-            .attach_to(surface)
-            .map_err(|err| WaylandError::ShmPool(err.to_string()))?;
+        buffer.attach_to(surface).map_err(shm_pool_err)?;
         surface.damage_buffer(0, 0, self.frame_width, self.frame_height);
         Ok(())
     }
@@ -133,7 +155,7 @@ impl ImageBufferRing
                     self.stride,
                     wl_shm::Format::Argb8888,
                 )
-                .map_err(|err| WaylandError::ShmPool(err.to_string()))?;
+                .map_err(shm_pool_err)?;
             self.buffers.push(buffer);
             let idx = self.buffers.len() - 1;
             self.next_cursor = (idx + 1) % self.buffers.len();

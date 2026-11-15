@@ -115,6 +115,22 @@ pub(crate) struct OverlayRuntime
 
 impl OverlayRuntime
 {
+    /// Queues a compositor frame callback on `image_surface` and optionally commits immediately.
+    pub(crate) fn queue_image_frame_callback(&mut self, commit_now: bool)
+    {
+        if let Some(scene) = &self.scene
+        {
+            self.frame_callback_pending = true;
+            scene
+                .image_surface
+                .frame(&self.qh, FrameCallbackData(scene.image_surface.clone()));
+            if commit_now
+            {
+                scene.image_surface.commit();
+            }
+        }
+    }
+
     /// Requests a Wayland frame callback on `image_surface` when animation or streaming needs ticks.
     pub(crate) fn ensure_frame_callback_if_needed(&mut self)
     {
@@ -129,14 +145,7 @@ impl OverlayRuntime
             return;
         }
 
-        if let Some(scene) = &self.scene
-        {
-            self.frame_callback_pending = true;
-            scene
-                .image_surface
-                .frame(&self.qh, FrameCallbackData(scene.image_surface.clone()));
-            scene.image_surface.commit();
-        }
+        self.queue_image_frame_callback(true);
     }
 
     /// Cancels or schedules the `500 ms` debounced config save and `2000 ms` handle fade timer.
@@ -214,19 +223,19 @@ impl OverlayRuntime
     /// Cancels an active corner-handle fade timer if armed.
     pub(crate) fn cancel_fade_timer(&mut self)
     {
-        if let Some(token) = self.fade_timer_token.take()
-        {
-            self.loop_handle.remove(token);
-        }
+        clear_timer(&self.loop_handle, &mut self.fade_timer_token);
+    }
+
+    /// Cancels an active state persistence debounce timer if armed.
+    pub(crate) fn cancel_save_timer(&mut self)
+    {
+        clear_timer(&self.loop_handle, &mut self.save_timer_token);
     }
 
     /// Arms or resets the 500 ms debounce timer before persisting overlay coordinates and scale.
     pub(crate) fn schedule_save_timer(&mut self)
     {
-        if let Some(token) = self.save_timer_token.take()
-        {
-            self.loop_handle.remove(token);
-        }
+        self.cancel_save_timer();
 
         let timer = Timer::from_duration(Duration::from_millis(SAVE_DEBOUNCE_MS));
         if let Ok(token) = self.loop_handle.insert_source(timer, |_, _, state| {
@@ -279,12 +288,21 @@ impl OverlayRuntime
     pub(crate) fn shutdown_cleanup(&mut self)
     {
         self.cancel_fade_timer();
-        if let Some(token) = self.save_timer_token.take()
-        {
-            self.loop_handle.remove(token);
-        }
+        self.cancel_save_timer();
         self.flush_pending_save();
         self.cache.stop();
         tracing::info!("Wayland overlay shutdown cleanup complete");
+    }
+}
+
+/// Removes an optional scheduled `calloop` timer token cleanly from the event loop.
+fn clear_timer(
+    loop_handle: &LoopHandle<'static, OverlayRuntime>,
+    slot: &mut Option<RegistrationToken>,
+)
+{
+    if let Some(token) = slot.take()
+    {
+        loop_handle.remove(token);
     }
 }

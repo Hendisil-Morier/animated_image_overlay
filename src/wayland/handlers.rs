@@ -2,7 +2,7 @@
 
 // SCTK handler traits covering registry, outputs, SHM, frames, layer-shell, seat, and input.
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, FrameCallbackData},
+    compositor::CompositorHandler,
     delegate_registry,
     globals::GlobalData,
     output::{OutputHandler, OutputState},
@@ -81,14 +81,13 @@ impl CompositorHandler for OverlayRuntime
     {
     }
 
-    fn frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, surface: &WlSurface, _time: u32)
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &WlSurface, _time: u32)
     {
-        let Some(scene) = &mut self.scene
-        else
-        {
-            return;
-        };
-        if *surface != scene.image_surface
+        let is_image_surface = self
+            .scene
+            .as_ref()
+            .is_some_and(|scene| *surface == scene.image_surface);
+        if !is_image_surface
         {
             return;
         }
@@ -105,11 +104,9 @@ impl CompositorHandler for OverlayRuntime
             {
                 Ok(argb) =>
                 {
-                    self.frame_callback_pending = true;
-                    scene
-                        .image_surface
-                        .frame(qh, FrameCallbackData(scene.image_surface.clone()));
-                    if let Err(err) = scene.present_frame(&argb)
+                    self.queue_image_frame_callback(false);
+                    if let Some(scene) = &mut self.scene
+                        && let Err(err) = scene.present_frame(&argb)
                     {
                         tracing::warn!(error = %err, frame_index = idx, "Failed presenting frame");
                     }
@@ -121,11 +118,7 @@ impl CompositorHandler for OverlayRuntime
             },
             TickOutcome::NoChange =>
             {
-                self.frame_callback_pending = true;
-                scene
-                    .image_surface
-                    .frame(qh, FrameCallbackData(scene.image_surface.clone()));
-                scene.image_surface.commit();
+                self.queue_image_frame_callback(true);
             }
         }
     }

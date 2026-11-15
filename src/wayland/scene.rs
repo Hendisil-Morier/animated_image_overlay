@@ -16,10 +16,10 @@ use smithay_client_toolkit::{
     },
     subcompositor::{SubcompositorState, SubsurfaceData},
 };
-// Raw Wayland protocol surface, subsurface, output, SHM, and viewport objects.
+// Raw Wayland protocol surface, subsurface, output, and viewport objects.
 use wayland_client::{
     Dispatch, QueueHandle,
-    protocol::{wl_output::WlOutput, wl_shm, wl_subsurface::WlSubsurface, wl_surface::WlSurface},
+    protocol::{wl_output::WlOutput, wl_subsurface::WlSubsurface, wl_surface::WlSurface},
 };
 use wayland_protocols::wp::viewporter::client::{
     wp_viewport::WpViewport, wp_viewporter::WpViewporter,
@@ -27,12 +27,32 @@ use wayland_protocols::wp::viewporter::client::{
 
 // Chrome subsurfaces, SHM frame ring, monitor metadata, layout, input state, and errors.
 use super::{
-    chrome::OverlayChrome, input::InputState, monitor::MonitorDescriptor, shm_ring::ImageBufferRing,
+    chrome::OverlayChrome,
+    input::InputState,
+    monitor::MonitorDescriptor,
+    shm_ring::{ImageBufferRing, create_argb_buffer, shm_pool_err},
 };
 use crate::{
+    decode::BYTES_PER_PIXEL,
     error::{OverlayError, WaylandError},
     layout::{HANDLE_SIZE, OverlayLayout},
 };
+
+/// Creates a desynchronized child subsurface with empty click-through input region.
+pub(crate) fn create_desync_passive_subsurface<D>(
+    subcompositor: &SubcompositorState,
+    parent: &WlSurface,
+    empty_region: &Region,
+    qh: &QueueHandle<D>,
+) -> (WlSubsurface, WlSurface)
+where
+    D: Dispatch<WlSurface, SurfaceData<()>> + Dispatch<WlSubsurface, SubsurfaceData> + 'static,
+{
+    let (subsurface, surface) = subcompositor.create_subsurface(parent.clone(), qh);
+    subsurface.set_desync();
+    surface.set_input_region(Some(empty_region.wl_region()));
+    (subsurface, surface)
+}
 
 /// Coordinates parent transparent layer surface, child animation subsurface, and chrome overlays.
 pub(crate) struct OverlayScene
@@ -115,23 +135,19 @@ impl OverlayScene
 
         let parent_wl = parent_layer.wl_surface().clone();
         let (image_subsurface, image_surface) =
-            subcompositor.create_subsurface(parent_wl.clone(), qh);
-        image_subsurface.set_desync();
-        image_surface.set_input_region(Some(empty_region.wl_region()));
+            create_desync_passive_subsurface(subcompositor, &parent_wl, &empty_region, qh);
 
         let parent_viewport = viewporter.get_viewport(&parent_wl, qh, ());
         let image_viewport = viewporter.get_viewport(&image_surface, qh, ());
 
         let sw = (monitor.width.max(1)) as u32;
         let sh = (monitor.height.max(1)) as u32;
-        let handle_bytes = (HANDLE_SIZE as usize) * (HANDLE_SIZE as usize) * 4;
-        let chrome_bytes = 64 + handle_bytes * 2 + ((sw + sh) as usize) * 8 + 4096;
-        let mut chrome_pool = SlotPool::new(chrome_bytes, shm)
-            .map_err(|err| WaylandError::ShmPool(err.to_string()))?;
+        let handle_bytes = (HANDLE_SIZE as usize) * (HANDLE_SIZE as usize) * BYTES_PER_PIXEL;
+        let chrome_bytes =
+            64 + handle_bytes * 2 + ((sw + sh) as usize) * 2 * BYTES_PER_PIXEL + 4096;
+        let mut chrome_pool = SlotPool::new(chrome_bytes, shm).map_err(shm_pool_err)?;
 
-        let (parent_transparent_buf, parent_slice) = chrome_pool
-            .create_buffer(1, 1, 4, wl_shm::Format::Argb8888)
-            .map_err(|err| WaylandError::ShmPool(err.to_string()))?;
+        let (parent_transparent_buf, parent_slice) = create_argb_buffer(&mut chrome_pool, 1, 1)?;
         parent_slice.fill(0);
 
         let chrome = OverlayChrome::create(
@@ -179,7 +195,7 @@ impl OverlayScene
 
         self.parent_transparent_buf
             .attach_to(self.parent_layer.wl_surface())
-            .map_err(|err| WaylandError::ShmPool(err.to_string()))?;
+            .map_err(shm_pool_err)?;
         self.parent_layer.wl_surface().damage_buffer(0, 0, 1, 1);
         self.parent_viewport.set_destination(sw as i32, sh as i32);
 

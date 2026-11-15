@@ -6,20 +6,23 @@ use smithay_client_toolkit::{
     shm::slot::{Buffer, SlotPool},
     subcompositor::{SubcompositorState, SubsurfaceData},
 };
-// Wayland surface, subsurface, SHM format, and viewport cropping objects.
+// Wayland surface, subsurface, and viewport cropping objects.
 use wayland_client::{
     Dispatch, QueueHandle,
-    protocol::{wl_shm, wl_subsurface::WlSubsurface, wl_surface::WlSurface},
+    protocol::{wl_subsurface::WlSubsurface, wl_surface::WlSurface},
 };
 use wayland_protocols::wp::viewporter::client::{
     wp_viewport::WpViewport, wp_viewporter::WpViewporter,
 };
 
-// Domain errors, handle sizing, layout rects, and pointer interaction state.
+// Domain errors, pixel sizing, handle sizing, layout rects, subsurface/SHM helpers, and input state.
+use super::{
+    input::InputState, scene::create_desync_passive_subsurface, shm_ring::create_argb_buffer,
+};
 use crate::{
+    decode::BYTES_PER_PIXEL,
     error::{OverlayError, WaylandError},
     layout::{HANDLE_SIZE, LogicalRect},
-    wayland::input::InputState,
 };
 
 // Corner radius of the rendered 28x28 corner handle matching CSS `border-radius: 8px`.
@@ -103,60 +106,36 @@ impl OverlayChrome
             + 'static,
     {
         let (handle_subsurface, handle_surface) =
-            subcompositor.create_subsurface(parent_wl.clone(), qh);
-        handle_subsurface.set_desync();
-        handle_surface.set_input_region(Some(empty_region.wl_region()));
+            create_desync_passive_subsurface(subcompositor, parent_wl, empty_region, qh);
         handle_subsurface.place_above(image_surface);
 
         let handle_idle_buf = create_handle_buffer(chrome_pool, HANDLE_IDLE_ALPHA)?;
         let handle_hover_buf = create_handle_buffer(chrome_pool, HANDLE_HOVER_ALPHA)?;
 
-        let edges = [
-            create_outline_edge(
-                qh,
-                subcompositor,
-                viewporter,
-                parent_wl,
-                &handle_surface,
-                empty_region,
-                chrome_pool,
-                screen_width,
-                true,
-            )?,
-            create_outline_edge(
-                qh,
-                subcompositor,
-                viewporter,
-                parent_wl,
-                &handle_surface,
-                empty_region,
-                chrome_pool,
-                screen_width,
-                true,
-            )?,
-            create_outline_edge(
-                qh,
-                subcompositor,
-                viewporter,
-                parent_wl,
-                &handle_surface,
-                empty_region,
-                chrome_pool,
-                screen_height,
-                false,
-            )?,
-            create_outline_edge(
-                qh,
-                subcompositor,
-                viewporter,
-                parent_wl,
-                &handle_surface,
-                empty_region,
-                chrome_pool,
-                screen_height,
-                false,
-            )?,
+        let edge_specs = [
+            (screen_width, true),
+            (screen_width, true),
+            (screen_height, false),
+            (screen_height, false),
         ];
+        let mut built_edges = Vec::with_capacity(4);
+        for (length, horizontal) in edge_specs
+        {
+            built_edges.push(create_outline_edge(
+                qh,
+                subcompositor,
+                viewporter,
+                parent_wl,
+                &handle_surface,
+                empty_region,
+                chrome_pool,
+                length,
+                horizontal,
+            )?);
+        }
+        let edges: [OutlineEdge; 4] = built_edges.try_into().map_err(|_| {
+            WaylandError::ShmPool(String::from("Invalid outline edge array length"))
+        })?;
 
         Ok(Self {
             handle_subsurface,
@@ -252,14 +231,7 @@ impl OutlineEdge
         self.subsurface.set_position(x, y);
         let _ = self.buffer.attach_to(&self.surface);
 
-        let (cw, ch) = if self.horizontal
-        {
-            (clamped, OUTLINE_THICKNESS)
-        }
-        else
-        {
-            (OUTLINE_THICKNESS, clamped)
-        };
+        let (cw, ch) = edge_dimensions(clamped, self.horizontal);
 
         self.viewport
             .set_source(0.0, 0.0, f64::from(cw), f64::from(ch));
@@ -269,13 +241,24 @@ impl OutlineEdge
     }
 }
 
+/// Computes `(width, height)` for an outline border strip of `span` pixels.
+fn edge_dimensions(span: i32, horizontal: bool) -> (i32, i32)
+{
+    if horizontal
+    {
+        (span, OUTLINE_THICKNESS)
+    }
+    else
+    {
+        (OUTLINE_THICKNESS, span)
+    }
+}
+
 /// Allocates a 28x28 rounded-corner white handle buffer with premultiplied `alpha`.
 fn create_handle_buffer(pool: &mut SlotPool, alpha: u8) -> Result<Buffer, OverlayError>
 {
     let size = HANDLE_SIZE as i32;
-    let (buffer, slice) = pool
-        .create_buffer(size, size, size * 4, wl_shm::Format::Argb8888)
-        .map_err(|err| WaylandError::ShmPool(err.to_string()))?;
+    let (buffer, slice) = create_argb_buffer(pool, size, size)?;
 
     fill_rounded_handle_argb(slice, HANDLE_SIZE, HANDLE_CORNER_RADIUS, alpha);
     Ok(buffer)
@@ -301,24 +284,14 @@ where
         + 'static,
 {
     let len = length.max(1);
-    let (subsurface, surface) = subcompositor.create_subsurface(parent.clone(), qh);
-    subsurface.set_desync();
-    surface.set_input_region(Some(empty_region.wl_region()));
+    let (subsurface, surface) =
+        create_desync_passive_subsurface(subcompositor, parent, empty_region, qh);
     subsurface.place_below(handle_surface);
 
     let viewport = viewporter.get_viewport(&surface, qh, ());
-    let (bw, bh) = if horizontal
-    {
-        (len, OUTLINE_THICKNESS)
-    }
-    else
-    {
-        (OUTLINE_THICKNESS, len)
-    };
+    let (bw, bh) = edge_dimensions(len, horizontal);
 
-    let (buffer, slice) = pool
-        .create_buffer(bw, bh, bw * 4, wl_shm::Format::Argb8888)
-        .map_err(|err| WaylandError::ShmPool(err.to_string()))?;
+    let (buffer, slice) = create_argb_buffer(pool, bw, bh)?;
 
     fill_dashed_argb(slice, bw as u32, bh as u32, horizontal, OUTLINE_ALPHA);
 
@@ -347,8 +320,8 @@ fn fill_rounded_handle_argb(argb: &mut [u8], size: u32, radius: u32, alpha: u8)
             let dist = (dx * dx + dy * dy).sqrt();
             let coverage = (r + 0.5 - dist).clamp(0.0, 1.0);
             let a = (f64::from(alpha) * coverage).round() as u8;
-            let idx = ((py * size + px) * 4) as usize;
-            argb[idx..idx + 4].copy_from_slice(&[a, a, a, a]);
+            let idx = (py * size + px) as usize * BYTES_PER_PIXEL;
+            argb[idx..idx + BYTES_PER_PIXEL].copy_from_slice(&[a, a, a, a]);
         }
     }
 }
@@ -387,8 +360,8 @@ fn fill_dashed_argb(argb: &mut [u8], width: u32, height: u32, horizontal: bool, 
             {
                 0
             };
-            let idx = ((py * width + px) * 4) as usize;
-            argb[idx..idx + 4].copy_from_slice(&[val, val, val, val]);
+            let idx = (py * width + px) as usize * BYTES_PER_PIXEL;
+            argb[idx..idx + BYTES_PER_PIXEL].copy_from_slice(&[val, val, val, val]);
         }
     }
 }
