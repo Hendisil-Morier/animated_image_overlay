@@ -134,6 +134,15 @@ impl Default for InputState
 
 impl InputState
 {
+    /// Constructs input state starting in either passive click-through or interactive edit mode.
+    pub fn with_editing(editing: bool) -> Self
+    {
+        Self {
+            editing,
+            ..Self::default()
+        }
+    }
+
     /// Returns `true` while an active mouse move or resize drag is in progress.
     pub fn is_dragging(&self) -> bool
     {

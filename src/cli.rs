@@ -19,6 +19,20 @@ const DEFAULT_BASE_WIDTH: u32 = 500;
 // Default target monitor selector when `--monitor` is omitted.
 const DEFAULT_MONITOR: &str = "0";
 
+// Concise mouse and keyboard interaction summary printed in `--help`.
+const CONTROLS_HELP: &str = "\
+Controls:
+  Left-drag / Right-drag / Scroll   Move, resize, or zoom (corner handle, or anywhere in edit mode)
+  Triple-click                      Toggle interactive edit mode
+  Middle-click                      Quit overlay (corner handle only while in edit mode)
+
+Edit mode keys:
+  Esc                               Exit edit mode back to click-through playback
+  Arrows / hjkl                     Nudge overlay position
+  + / -                             Zoom scale up or down
+  Space                             Pause or resume animation
+  q                                 Quit overlay";
+
 /// Outcome of parsing CLI flags before starting the Wayland runtime.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CliOutcome
@@ -35,7 +49,8 @@ pub enum CliOutcome
 #[command(
     name = "animated_image_widget",
     version,
-    about = "Display an animated image as a click-through Wayland overlay."
+    about = "Display an animated image as a click-through Wayland overlay.",
+    after_help = CONTROLS_HELP
 )]
 pub struct CliArgs
 {
@@ -78,6 +93,14 @@ pub struct CliArgs
         help = "Initial display scale (overrides saved scale)."
     )]
     pub scale: Option<f64>,
+
+    /// Start directly in interactive edit mode with borders and keyboard focus enabled.
+    #[arg(
+        short = 'e',
+        long = "edit",
+        help = "Start in interactive edit mode (border and keyboard shortcuts enabled)."
+    )]
+    pub edit: bool,
 }
 
 impl CliArgs

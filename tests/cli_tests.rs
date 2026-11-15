@@ -37,6 +37,7 @@ fn cli_applies_default_flags()
     assert_eq!(args.base_width, 500);
     assert_eq!(args.monitor, "0");
     assert_eq!(args.scale, None);
+    assert!(!args.edit);
 }
 
 #[test]
@@ -53,6 +54,7 @@ fn cli_parses_explicit_flags()
         "DP-2",
         "-s",
         "0.75",
+        "--edit",
     ])
     .expect("explicit CLI flags should parse");
 
@@ -67,6 +69,7 @@ fn cli_parses_explicit_flags()
     assert_eq!(args.base_width, 320);
     assert_eq!(args.monitor, "DP-2");
     assert_eq!(args.scale, Some(0.75));
+    assert!(args.edit);
 }
 
 #[test]
@@ -115,5 +118,26 @@ fn cli_handles_help_flag_as_early_exit()
 {
     let outcome = CliArgs::parse_and_validate_from(["overlay", "--help"])
         .expect("--help should return EarlyExit rather than error");
-    assert!(matches!(outcome, CliOutcome::EarlyExit(text) if text.contains("--base-width")));
+    let CliOutcome::EarlyExit(text) = outcome
+    else
+    {
+        panic!("expected CliOutcome::EarlyExit");
+    };
+
+    for expected in [
+        "--base-width",
+        "--edit",
+        "Triple-click",
+        "Esc",
+        "hjkl",
+        "+ / -",
+        "Space",
+        "q",
+    ]
+    {
+        assert!(
+            text.contains(expected),
+            "--help output missing {expected:?}:\n{text}"
+        );
+    }
 }

@@ -354,3 +354,27 @@ fn pointer_detach_and_chorded_buttons_preserve_consistent_drag_state()
     assert!(!input.on_button_release(BTN_LEFT).schedule_save);
     assert!(input.on_button_release(BTN_RIGHT).schedule_save);
 }
+
+#[test]
+fn startup_edit_mode_enables_shortcuts_and_keeps_handle_visible()
+{
+    let mut layout = sample_layout();
+    let mut input = InputState::with_editing(true);
+
+    assert!(input.editing);
+    assert!(input.handle_visible);
+    assert_eq!(
+        input.desired_cursor((220.0, 170.0), &layout),
+        PointerCursor::Grab
+    );
+
+    // Fade timeouts never hide the corner handle while starting in edit mode.
+    assert!(!input.on_fade_timeout().handle_visual_changed);
+    assert!(input.handle_visible);
+
+    // Keyboard shortcuts respond immediately without triple-clicking first.
+    let nudged = input.on_key_press(Keysym::Down, &mut layout);
+    assert!(nudged.layout_changed);
+    assert!(nudged.schedule_save);
+    assert_eq!(layout.state().y, 150.0 + KEYBOARD_NUDGE_PX);
+}
