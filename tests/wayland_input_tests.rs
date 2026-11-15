@@ -3,7 +3,7 @@
 
 use animated_image_widget::{
     config::OverlayState,
-    layout::{KEYBOARD_NUDGE_PX, OverlayLayout},
+    layout::{KEYBOARD_NUDGE_PX, OverlayLayout, RotateDirection, Rotation},
     wayland::{
         ClickTracker, InputState, KeyShortcut, MonitorDescriptor, PointerCursor,
         TRIPLE_CLICK_WINDOW_MS,
@@ -223,7 +223,45 @@ fn keyboard_shortcuts_operate_only_in_edit_mode()
         map_edit_keysym(Keysym::minus),
         Some(KeyShortcut::Scale { steps: -1 })
     );
+    assert_eq!(
+        map_edit_keysym(Keysym::r),
+        Some(KeyShortcut::Rotate(RotateDirection::Clockwise))
+    );
+    assert_eq!(
+        map_edit_keysym(Keysym::R),
+        Some(KeyShortcut::Rotate(RotateDirection::CounterClockwise))
+    );
     assert_eq!(map_edit_keysym(Keysym::q), Some(KeyShortcut::Quit));
+}
+
+#[test]
+fn rotate_shortcuts_work_only_in_edit_mode_and_ignore_repeats()
+{
+    let mut layout = sample_layout();
+    let mut input = InputState::default();
+
+    // Ignored in passive playback.
+    let passive = input.on_key_press(Keysym::r, &mut layout);
+    assert!(!passive.layout_changed);
+    assert_eq!(layout.rotation(), Rotation::Deg0);
+
+    input.editing = true;
+
+    let cw = input.on_key_press(Keysym::r, &mut layout);
+    assert!(cw.layout_changed);
+    assert!(!cw.schedule_save);
+    assert_eq!(layout.rotation(), Rotation::Deg90);
+    assert_eq!(layout.overlay_size(), (300, 400));
+
+    // Held r/R repeat events are ignored so orientation skips stay single-step.
+    assert!(!input.on_key_repeat(Keysym::r, &mut layout).layout_changed);
+    assert_eq!(layout.rotation(), Rotation::Deg90);
+
+    let ccw = input.on_key_press(Keysym::R, &mut layout);
+    assert!(ccw.layout_changed);
+    assert!(!ccw.schedule_save);
+    assert_eq!(layout.rotation(), Rotation::Deg0);
+    assert_eq!(layout.overlay_size(), (400, 300));
 }
 
 #[test]
