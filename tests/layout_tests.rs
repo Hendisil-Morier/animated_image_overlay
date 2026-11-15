@@ -2,7 +2,10 @@
 
 use animated_image_widget::{
     config::OverlayState,
-    layout::{HANDLE_SIZE, LogicalRect, MIN_OVERLAY_SIZE, OverlayLayout, SCROLL_ZOOM_BASE},
+    layout::{
+        HANDLE_SIZE, LogicalRect, MIN_OVERLAY_SIZE, OverlayLayout, RotateDirection, Rotation,
+        SCROLL_ZOOM_BASE,
+    },
 };
 
 #[test]
@@ -116,4 +119,88 @@ fn layout_computes_passive_handle_and_edit_input_regions()
 
     assert!(layout.handle_contains(490.0, 490.0));
     assert!(!layout.handle_contains(150.0, 250.0));
+}
+
+#[test]
+fn rotation_enum_cycles_full_turn_and_swaps_quarter_turn_axes()
+{
+    let mut rot = Rotation::Deg0;
+    rot = rot.rotated(RotateDirection::Clockwise);
+    assert_eq!(rot, Rotation::Deg90);
+    assert_eq!(rot.orient_dimensions(500, 700), (700, 500));
+
+    rot = rot.rotated(RotateDirection::Clockwise);
+    assert_eq!(rot, Rotation::Deg180);
+    assert_eq!(rot.orient_dimensions(500, 700), (500, 700));
+
+    rot = rot.rotated(RotateDirection::Clockwise);
+    assert_eq!(rot, Rotation::Deg270);
+    assert_eq!(rot.orient_dimensions(500, 700), (700, 500));
+
+    rot = rot.rotated(RotateDirection::Clockwise);
+    assert_eq!(rot, Rotation::Deg0);
+
+    assert_eq!(
+        rot.rotated(RotateDirection::CounterClockwise),
+        Rotation::Deg270
+    );
+    assert_eq!(
+        Rotation::Deg90.rotated(RotateDirection::CounterClockwise),
+        Rotation::Deg0
+    );
+}
+
+#[test]
+fn layout_rotate_swaps_bounds_preserves_center_and_uses_oriented_resize()
+{
+    let mut layout = OverlayLayout::new(
+        400,
+        200,
+        1920,
+        1080,
+        OverlayState {
+            x: 500.0,
+            y: 400.0,
+            scale: 1.0,
+        },
+    );
+
+    layout.rotate(RotateDirection::Clockwise);
+    assert_eq!(layout.rotation(), Rotation::Deg90);
+    assert_eq!(layout.oriented_frame_size(), (200, 400));
+    assert_eq!(layout.overlay_size(), (200, 400));
+    assert_eq!(layout.state().x, 600.0);
+    assert_eq!(layout.state().y, 300.0);
+
+    let start_scale = layout.state().scale;
+    layout.on_resize(start_scale, 100.0);
+    assert!((layout.state().scale - 1.5).abs() < 1e-9);
+    assert_eq!(layout.overlay_size(), (300, 600));
+
+    layout.rotate(RotateDirection::CounterClockwise);
+    assert_eq!(layout.rotation(), Rotation::Deg0);
+    assert_eq!(layout.overlay_size(), (600, 300));
+}
+
+#[test]
+fn layout_rotate_clamps_wide_overlay_against_screen_height()
+{
+    let mut layout = OverlayLayout::new(
+        1800,
+        600,
+        1920,
+        1080,
+        OverlayState {
+            x: 0.0,
+            y: 100.0,
+            scale: 1.0,
+        },
+    );
+
+    layout.rotate(RotateDirection::Clockwise);
+    let expected_scale = 1080.0 / 1800.0;
+    assert!((layout.state().scale - expected_scale).abs() < 1e-9);
+    let (w, h) = layout.overlay_size();
+    assert!(w <= 1920 && h <= 1080);
+    assert!(layout.state().x >= 0.0 && layout.state().y >= 0.0);
 }

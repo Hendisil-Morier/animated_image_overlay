@@ -22,6 +22,64 @@ pub const KEYBOARD_NUDGE_PX: f64 = 12.0;
 /// Equivalent scroll notches applied per keyboard `+`/`-` scale adjustment in edit mode.
 pub const KEYBOARD_ZOOM_STEP: f64 = 2.0;
 
+/// Direction of a discrete 90-degree overlay rotation step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RotateDirection
+{
+    /// Turn 90 degrees clockwise around the overlay center.
+    Clockwise,
+
+    /// Turn 90 degrees counter-clockwise around the overlay center.
+    CounterClockwise,
+}
+
+/// Clockwise 90-degree orientation applied visually to the overlay surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Rotation
+{
+    /// Default unrotated orientation (`0` degrees).
+    #[default]
+    Deg0,
+
+    /// Rotated `90` degrees clockwise (swaps width and height).
+    Deg90,
+
+    /// Rotated `180` degrees (preserves original width and height).
+    Deg180,
+
+    /// Rotated `270` degrees clockwise (`90` counter-clockwise; swaps width and height).
+    Deg270,
+}
+
+impl Rotation
+{
+    /// Advances orientation by one quarter turn in `direction`.
+    pub const fn rotated(self, direction: RotateDirection) -> Self
+    {
+        match (self, direction)
+        {
+            (Self::Deg0, RotateDirection::Clockwise) => Self::Deg90,
+            (Self::Deg90, RotateDirection::Clockwise) => Self::Deg180,
+            (Self::Deg180, RotateDirection::Clockwise) => Self::Deg270,
+            (Self::Deg270, RotateDirection::Clockwise) => Self::Deg0,
+            (Self::Deg0, RotateDirection::CounterClockwise) => Self::Deg270,
+            (Self::Deg270, RotateDirection::CounterClockwise) => Self::Deg180,
+            (Self::Deg180, RotateDirection::CounterClockwise) => Self::Deg90,
+            (Self::Deg90, RotateDirection::CounterClockwise) => Self::Deg0,
+        }
+    }
+
+    /// Returns `(width, height)` oriented for this rotation (`Deg90` and `Deg270` swap axes).
+    pub const fn orient_dimensions(self, width: u32, height: u32) -> (u32, u32)
+    {
+        match self
+        {
+            Self::Deg0 | Self::Deg180 => (width, height),
+            Self::Deg90 | Self::Deg270 => (height, width),
+        }
+    }
+}
+
 /// Integer logical pixel rectangle aligned with Wayland surface-local input regions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LogicalRect
@@ -57,6 +115,9 @@ pub struct OverlayLayout
 
     // Current position and scale subject to clamping.
     state: OverlayState,
+
+    // Active 90-degree visual orientation relative to unrotated frame pixels.
+    rotation: Rotation,
 }
 
 impl OverlayLayout
@@ -76,6 +137,7 @@ impl OverlayLayout
             screen_width: screen_width.max(1),
             screen_height: screen_height.max(1),
             state,
+            rotation: Rotation::default(),
         };
         layout.clamp();
         layout
@@ -89,10 +151,23 @@ impl OverlayLayout
         self.clamp();
     }
 
-    /// Returns the stored base frame width and height in pixels.
+    /// Returns the stored unrotated base frame width and height in pixels.
     pub fn frame_size(&self) -> (u32, u32)
     {
         (self.frame_width, self.frame_height)
+    }
+
+    /// Returns frame width and height swapped when rotated 90 or 270 degrees.
+    pub fn oriented_frame_size(&self) -> (u32, u32)
+    {
+        self.rotation
+            .orient_dimensions(self.frame_width, self.frame_height)
+    }
+
+    /// Returns the active 90-degree visual rotation.
+    pub fn rotation(&self) -> Rotation
+    {
+        self.rotation
     }
 
     /// Returns the active monitor logical dimensions in pixels.
@@ -107,19 +182,21 @@ impl OverlayLayout
         self.state
     }
 
-    /// Computes truncated logical display dimensions matching Python `int(fw * scale)`.
+    /// Computes truncated logical display dimensions matching oriented `frame * scale`.
     pub fn overlay_size(&self) -> (u32, u32)
     {
-        let width = ((f64::from(self.frame_width) * self.state.scale) as u32).max(1);
-        let height = ((f64::from(self.frame_height) * self.state.scale) as u32).max(1);
+        let (fw, fh) = self.oriented_frame_size();
+        let width = ((f64::from(fw) * self.state.scale) as u32).max(1);
+        let height = ((f64::from(fh) * self.state.scale) as u32).max(1);
         (width, height)
     }
 
     /// Clamps `scale` within `[min_scale, max_scale]` and `(x, y)` inside monitor bounds.
     pub fn clamp(&mut self)
     {
-        let fw = f64::from(self.frame_width);
-        let fh = f64::from(self.frame_height);
+        let (eff_w, eff_h) = self.oriented_frame_size();
+        let fw = f64::from(eff_w);
+        let fh = f64::from(eff_h);
         let sw = f64::from(self.screen_width);
         let sh = f64::from(self.screen_height);
 
@@ -160,11 +237,28 @@ impl OverlayLayout
     /// Applies right-drag horizontal scaling anchored at the top-left corner and re-clamps.
     pub fn on_resize(&mut self, start_scale: f64, dx: f64)
     {
-        let w0 = f64::from(self.frame_width) * start_scale;
+        let (eff_w, _) = self.oriented_frame_size();
+        let w0 = f64::from(eff_w) * start_scale;
         if w0 > 0.0 && w0.is_finite()
         {
             self.state.scale = start_scale * (w0 + dx) / w0;
         }
+        self.clamp();
+    }
+
+    /// Rotates the overlay by 90 degrees while keeping its visual center stationary inside bounds.
+    pub fn rotate(&mut self, direction: RotateDirection)
+    {
+        let (old_w, old_h) = self.overlay_size();
+        let cx = self.state.x + f64::from(old_w) * 0.5;
+        let cy = self.state.y + f64::from(old_h) * 0.5;
+
+        self.rotation = self.rotation.rotated(direction);
+        self.clamp();
+
+        let (new_w, new_h) = self.overlay_size();
+        self.state.x = cx - f64::from(new_w) * 0.5;
+        self.state.y = cy - f64::from(new_h) * 0.5;
         self.clamp();
     }
 
