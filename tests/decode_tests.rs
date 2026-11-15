@@ -700,10 +700,18 @@ fn resize_premultiplied_argb8888_downscales_and_preserves_identity()
     let same = resize_premultiplied_argb8888(&solid, 20, 10, 20, 10, &mut resizer).unwrap();
     assert_eq!(same, solid);
 
-    // Downscaling halves dimensions while preserving solid premultiplied pixel values.
+    // Downscaling halves dimensions while preserving premultiplied channel ordering (`<= A`).
     let small = resize_premultiplied_argb8888(&solid, 20, 10, 10, 5, &mut resizer).unwrap();
     assert_eq!(small.len(), 10 * 5 * 4);
     assert_eq!(&small[0..4], &[30, 90, 180, 255]);
+
+    let semi: Vec<u8> = [25_u8, 60, 110, 128]
+        .into_iter()
+        .cycle()
+        .take(20 * 10 * 4)
+        .collect();
+    let small_semi = resize_premultiplied_argb8888(&semi, 20, 10, 10, 5, &mut resizer).unwrap();
+    assert_eq!(&small_semi[0..4], &[25, 60, 110, 128]);
 
     // Mismatched source byte counts return an error rather than resizing invalid memory.
     assert!(resize_premultiplied_argb8888(&solid[..16], 20, 10, 10, 5, &mut resizer).is_err());

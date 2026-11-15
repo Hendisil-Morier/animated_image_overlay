@@ -154,6 +154,9 @@ pub(crate) fn encode_subsequent_frame(
 }
 
 /// Downscales a borrowed premultiplied `ARGB8888` pixel buffer to `(dst_w, dst_h)` with Lanczos3.
+///
+/// Leaves alpha multiplication disabled because `ARGB8888` cache frames are already premultiplied,
+/// avoiding redundant alpha scratch allocations and double premultiplication rounding error.
 pub fn resize_premultiplied_argb8888(
     src: &[u8],
     src_w: u32,
@@ -161,6 +164,20 @@ pub fn resize_premultiplied_argb8888(
     dst_w: u32,
     dst_h: u32,
     resizer: &mut Resizer,
+) -> Result<Vec<u8>, CacheError>
+{
+    resize_u8x4(src, src_w, src_h, dst_w, dst_h, resizer, false)
+}
+
+/// Resizes an `U8x4` pixel buffer with Lanczos3, enabling `mul_div_alpha` for straight alpha input.
+fn resize_u8x4(
+    src: &[u8],
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+    resizer: &mut Resizer,
+    use_alpha: bool,
 ) -> Result<Vec<u8>, CacheError>
 {
     validate_argb_buffer("source", src_w, src_h, src.len())?;
@@ -177,8 +194,9 @@ pub fn resize_premultiplied_argb8888(
         })?;
 
     let mut dst_img = FirImage::new(dst_w, dst_h, PixelType::U8x4);
+    let options = ResizeOptions::default().use_alpha(use_alpha);
     resizer
-        .resize(&src_img, &mut dst_img, &ResizeOptions::default())
+        .resize(&src_img, &mut dst_img, &options)
         .map_err(|err| CacheError::Decode {
             path: PathBuf::from("<memory>"),
             reason: err.to_string(),
@@ -187,7 +205,7 @@ pub fn resize_premultiplied_argb8888(
     Ok(dst_img.into_vec())
 }
 
-/// Downscales `rgba` with Lanczos3 only when `target_w < src_w`, preserving original size otherwise.
+/// Downscales straight `rgba` with Lanczos3 only when `target_w < src_w`, preserving original size otherwise.
 fn downscale_if_needed(
     rgba: Vec<u8>,
     src_w: u32,
@@ -202,7 +220,7 @@ fn downscale_if_needed(
         return Ok(rgba);
     }
 
-    resize_premultiplied_argb8888(&rgba, src_w, src_h, target_w, target_h, resizer)
+    resize_u8x4(&rgba, src_w, src_h, target_w, target_h, resizer, true)
 }
 
 // 40.24 fixed-point sampling resolution (24 fractional bits, 12-bit bilinear weights).
