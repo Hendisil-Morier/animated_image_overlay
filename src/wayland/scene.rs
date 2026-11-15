@@ -1,7 +1,5 @@
 //! Wayland layer-shell parent, image subsurface, viewport scaling, and input-region updates.
 
-// Lanczos3 resizer reused across oversized quarter-turn downscales.
-use fast_image_resize::Resizer;
 // SCTK compositing, layer-shell, SHM pool, and subsurface abstractions.
 use smithay_client_toolkit::{
     compositor::{CompositorState, Region, SurfaceData},
@@ -31,19 +29,18 @@ use wayland_protocols::wp::viewporter::client::{
     wp_viewport::WpViewport, wp_viewporter::WpViewporter,
 };
 
-// Chrome subsurfaces, display cache, SHM frame ring, monitor metadata, layout, and input state.
+// Chrome subsurfaces, frame staging pipeline, monitor metadata, SHM helpers, and input state.
 use super::{
     chrome::OverlayChrome,
-    display_cache::{DisplayCacheKey, DisplayFrameCache, angle_key},
+    frame_stage::FrameStage,
     input::InputState,
     monitor::MonitorDescriptor,
     shm_ring::{ImageBufferRing, create_argb_buffer, shm_pool_err},
 };
 use crate::{
     cache::FrameCache,
-    decode::{checked_argb_byte_len, resize_premultiplied_argb8888, rotate_argb8888_into},
     error::{OverlayError, WaylandError},
-    layout::{OverlayLayout, Rotation},
+    layout::{LogicalRect, OverlayLayout, Rotation},
 };
 
 // Dedicated 4 KiB pool capacity backing the 1x1 transparent parent layer buffer.
@@ -97,7 +94,7 @@ pub(crate) struct OverlayScene
     // Subsurface controller positioning `image_surface` relative to parent.
     image_subsurface: WlSubsurface,
 
-    // Hardware scaler mapping `frame_width x frame_height` buffer to `(w, h)` logical space.
+    // Hardware scaler mapping staged SHM frame buffer to logical overlay size.
     image_viewport: WpViewport,
 
     // Viewport stretching the 1x1 transparent parent buffer to cover the monitor.
@@ -109,14 +106,8 @@ pub(crate) struct OverlayScene
     // Dedicated shared memory pool holding `parent_transparent_buf`.
     _parent_pool: SlotPool,
 
-    // Reusable frame ring backing `image_surface` at source or scaled rotated bounds.
-    frame_ring: ImageBufferRing,
-
-    // Budgeted RAM cache of display-resolution frames avoiding repeated LZ4 and rotation work.
-    display_cache: DisplayFrameCache,
-
-    // Reusable Lanczos3 resizer downscaling oversized quarter-turn frames into `display_cache`.
-    resizer: Resizer,
+    // Staging pipeline managing SHM frame rings, Lanczos3 downscaling, and display caching.
+    frame_stage: FrameStage,
 
     // Corner handle and edit-mode dashed border subsurfaces.
     chrome: OverlayChrome,
@@ -203,7 +194,8 @@ impl OverlayScene
             sh as i32,
         )?;
 
-        let frame_ring = ImageBufferRing::new(shm, frame_width, frame_height)?;
+        let frame_stage =
+            FrameStage::new(shm, frame_width, frame_height, display_cache_budget_bytes)?;
 
         Ok(Self {
             parent_layer,
@@ -213,9 +205,7 @@ impl OverlayScene
             parent_viewport,
             parent_transparent_buf,
             _parent_pool: parent_pool,
-            frame_ring,
-            display_cache: DisplayFrameCache::new(display_cache_budget_bytes),
-            resizer: Resizer::new(),
+            frame_stage,
             chrome,
             screen_width: sw,
             screen_height: sh,
@@ -245,7 +235,13 @@ impl OverlayScene
         self.parent_layer.wl_surface().damage_buffer(0, 0, 1, 1);
         self.parent_viewport.set_destination(sw as i32, sh as i32);
 
-        let _retired_ring = self.stage_oriented_buffer(shm, layout, frame0_argb)?;
+        let _retired_ring = self.frame_stage.stage_oriented_buffer(
+            shm,
+            &self.image_surface,
+            layout,
+            self.chrome.scale(),
+            frame0_argb,
+        )?;
         self.sync_layout_inner(compositor, shm, layout, input, true)?;
         Ok(())
     }
@@ -284,9 +280,6 @@ impl OverlayScene
     }
 
     /// Uploads and attaches animation frame `frame_idx`, reusing `display_cache` when within budget.
-    ///
-    /// Returns any retired `ImageBufferRing` so callers keep the old SHM pool alive until after
-    /// committing `image_surface`.
     pub(crate) fn stage_frame_cached(
         &mut self,
         shm: &Shm,
@@ -295,160 +288,21 @@ impl OverlayScene
         frame_idx: usize,
     ) -> Result<Option<ImageBufferRing>, OverlayError>
     {
-        let spec = self.target_spec(layout, cache);
-        if let Some(key) = spec.cache_key
-        {
-            let (frame_count, decode_done, _) = cache.cache_profile();
-            if self.display_cache.sync(key, frame_count, decode_done)
-            {
-                if let Some(hit) = self.display_cache.get(frame_idx)
-                {
-                    return with_target_ring(
-                        &mut self.frame_ring,
-                        shm,
-                        spec.width,
-                        spec.height,
-                        |ring| ring.upload_and_attach(&self.image_surface, hit),
-                    );
-                }
-
-                let (frame_w, frame_h) = layout.frame_size();
-                let resizer = &mut self.resizer;
-                let buf = cache.with_frame_argb(
-                    frame_idx,
-                    |argb| -> Result<Vec<u8>, OverlayError> {
-                        if layout.quarter_turn().is_some()
-                        {
-                            return Ok(resize_premultiplied_argb8888(
-                                argb,
-                                frame_w,
-                                frame_h,
-                                spec.width,
-                                spec.height,
-                                resizer,
-                            )?);
-                        }
-
-                        let mut dst = vec![0_u8; checked_argb_byte_len(spec.width, spec.height)?];
-                        rotate_argb8888_into(
-                            argb,
-                            frame_w,
-                            frame_h,
-                            layout.rotation(),
-                            layout.flipped(),
-                            spec.width,
-                            spec.height,
-                            &mut dst,
-                        )?;
-                        Ok(dst)
-                    },
-                )??;
-                let retired =
-                    with_target_ring(&mut self.frame_ring, shm, spec.width, spec.height, |ring| {
-                        ring.upload_and_attach(&self.image_surface, &buf)
-                    })?;
-                self.display_cache.store(frame_idx, buf);
-                return Ok(retired);
-            }
-        }
-
-        self.display_cache.clear();
-        cache
-            .with_frame_argb(frame_idx, |argb| {
-                with_target_ring(&mut self.frame_ring, shm, spec.width, spec.height, |ring| {
-                    fill_ring_slot(ring, &self.image_surface, layout, argb)
-                })
-            })
-            .and_then(|inner| inner)
-    }
-
-    /// Computes desired SHM dimensions and optional `display_cache` key for `layout` and `cache`.
-    fn target_spec(&self, layout: &OverlayLayout, cache: &FrameCache) -> BufferTargetSpec
-    {
-        let buf_scale = self.chrome.scale().max(1) as u32;
-        let (ov_w, ov_h) = layout.overlay_size();
-        if let Some(quarter) = layout.quarter_turn()
-        {
-            let (frame_w, frame_h) = layout.frame_size();
-            let (scaled_w, scaled_h) = clamped_physical_size(
-                quarter.orient_dimensions(ov_w, ov_h),
-                buf_scale,
-                (frame_w, frame_h),
-            );
-            let (frame_count, decode_done, fits_source_ram) = cache.cache_profile();
-            // Gate quarter-turn downscaling on both oversized sources and fit inside `-c display`:
-            // small animations stream faster via source LRU copy, while huge overlays offload scaling
-            // to compositor GPU sampling rather than burning CPU Lanczos3 per frame.
-            if !fits_source_ram
-                && (scaled_w, scaled_h) != (frame_w, frame_h)
-                && self
-                    .display_cache
-                    .would_fit(scaled_w, scaled_h, frame_count, decode_done)
-            {
-                // Canonical 0 deg unflipped key lets Wayland buffer_transform handle quarter turns
-                // and horizontal flips without rebuilding cached pixels.
-                return BufferTargetSpec {
-                    width: scaled_w,
-                    height: scaled_h,
-                    cache_key: Some(DisplayCacheKey {
-                        width: scaled_w,
-                        height: scaled_h,
-                        angle_bits: angle_key(0.0),
-                        flipped: false,
-                    }),
-                };
-            }
-
-            return BufferTargetSpec {
-                width: frame_w,
-                height: frame_h,
-                cache_key: None,
-            };
-        }
-
-        let (target_w, target_h) =
-            clamped_physical_size((ov_w, ov_h), buf_scale, layout.oriented_frame_size());
-        BufferTargetSpec {
-            width: target_w,
-            height: target_h,
-            cache_key: Some(DisplayCacheKey {
-                width: target_w,
-                height: target_h,
-                angle_bits: angle_key(layout.rotation()),
-                flipped: layout.flipped(),
-            }),
-        }
-    }
-
-    /// Returns initial SHM dimensions for frame 0 before `display_cache` or full decode completes.
-    pub(crate) fn oriented_target_size(&self, layout: &OverlayLayout) -> (u32, u32)
-    {
-        if layout.quarter_turn().is_some()
-        {
-            return layout.frame_size();
-        }
-
-        let buf_scale = self.chrome.scale().max(1) as u32;
-        clamped_physical_size(
-            layout.overlay_size(),
-            buf_scale,
-            layout.oriented_frame_size(),
+        self.frame_stage.stage_frame_cached(
+            shm,
+            &self.image_surface,
+            layout,
+            cache,
+            self.chrome.scale(),
+            frame_idx,
         )
     }
 
     /// Reports when the active SHM ring should resize for sharpness, shrinking, or cache mode changes.
     pub(crate) fn needs_buffer_resync(&self, layout: &OverlayLayout, cache: &FrameCache) -> bool
     {
-        let spec = self.target_spec(layout, cache);
-        let (cur_w, cur_h) = self.frame_ring.dimensions();
-        if spec.width > cur_w || spec.height > cur_h
-        {
-            return true;
-        }
-
-        let want_pixels = u64::from(spec.width) * u64::from(spec.height);
-        let cur_pixels = u64::from(cur_w) * u64::from(cur_h);
-        want_pixels * 3 <= cur_pixels * 2
+        self.frame_stage
+            .needs_buffer_resync(layout, cache, self.chrome.scale())
     }
 
     /// Re-uploads `frame_idx` for `layout` orientation and atomically commits buffer + layout changes.
@@ -465,21 +319,6 @@ impl OverlayScene
         let _retired_ring = self.stage_frame_cached(shm, layout, cache, frame_idx)?;
         self.sync_layout_inner(compositor, shm, layout, input, true)?;
         Ok(())
-    }
-
-    /// Ensures the SHM frame ring matches `oriented_target_size(layout)` and renders or copies the
-    /// current frame straight into the active SHM slot attached to `self.image_surface`.
-    fn stage_oriented_buffer(
-        &mut self,
-        shm: &Shm,
-        layout: &OverlayLayout,
-        frame_argb: &[u8],
-    ) -> Result<Option<ImageBufferRing>, OverlayError>
-    {
-        let (target_w, target_h) = self.oriented_target_size(layout);
-        with_target_ring(&mut self.frame_ring, shm, target_w, target_h, |ring| {
-            fill_ring_slot(ring, &self.image_surface, layout, frame_argb)
-        })
     }
 
     /// Updates image subsurface position/scale, handle visibility/hover, dashed border, and input region.
@@ -506,24 +345,49 @@ impl OverlayScene
     ) -> Result<(), OverlayError>
     {
         let (sw, sh) = layout.screen_size();
-        if sw != self.screen_width || sh != self.screen_height
-        {
-            self.screen_width = sw;
-            self.screen_height = sh;
-            self.parent_viewport.set_destination(sw as i32, sh as i32);
-        }
+        self.sync_parent_viewport(sw, sh);
 
         let rect = layout.overlay_rect();
+        self.sync_image_surface_state(layout, rect, force_image_commit);
+
+        let handle_rect = layout.input_rect(false);
+        self.chrome
+            .sync_all(shm, (sw, sh), rect, handle_rect, input)?;
+
+        self.sync_interactivity_and_input_region(compositor, layout, input.editing)?;
+        self.parent_layer.wl_surface().commit();
+        Ok(())
+    }
+
+    /// Updates fullscreen parent viewport destination whenever monitor logical bounds change.
+    fn sync_parent_viewport(&mut self, sw: u32, sh: u32)
+    {
+        if sw == self.screen_width && sh == self.screen_height
+        {
+            return;
+        }
+
+        self.screen_width = sw;
+        self.screen_height = sh;
+        self.parent_viewport.set_destination(sw as i32, sh as i32);
+    }
+
+    /// Updates image subsurface coordinates, viewport destination, buffer transform, and commit state.
+    fn sync_image_surface_state(
+        &mut self,
+        layout: &OverlayLayout,
+        rect: LogicalRect,
+        force_image_commit: bool,
+    )
+    {
         self.image_subsurface.set_position(rect.x, rect.y);
 
-        let dst_w = rect.width as i32;
-        let dst_h = rect.height as i32;
+        let dst = (rect.width as i32, rect.height as i32);
         let mut image_state_changed = force_image_commit;
-
-        if (dst_w, dst_h) != self.last_image_dest
+        if dst != self.last_image_dest
         {
-            self.last_image_dest = (dst_w, dst_h);
-            self.image_viewport.set_destination(dst_w, dst_h);
+            self.last_image_dest = dst;
+            self.image_viewport.set_destination(dst.0, dst.1);
             image_state_changed = true;
         }
 
@@ -559,15 +423,20 @@ impl OverlayScene
         {
             self.image_surface.commit();
         }
+    }
 
-        let handle_rect = layout.input_rect(false);
-        self.chrome
-            .sync_all(shm, (sw, sh), rect, handle_rect, input)?;
-
-        if input.editing != self.last_editing
+    /// Syncs layer-shell keyboard interactivity and pointer input region for `editing`.
+    fn sync_interactivity_and_input_region(
+        &mut self,
+        compositor: &CompositorState,
+        layout: &OverlayLayout,
+        editing: bool,
+    ) -> Result<(), OverlayError>
+    {
+        if editing != self.last_editing
         {
-            self.last_editing = input.editing;
-            let interactivity = if input.editing
+            self.last_editing = editing;
+            let interactivity = if editing
             {
                 KeyboardInteractivity::OnDemand
             }
@@ -578,7 +447,7 @@ impl OverlayScene
             self.parent_layer.set_keyboard_interactivity(interactivity);
         }
 
-        let input_rect = layout.input_rect(input.editing);
+        let input_rect = layout.input_rect(editing);
         let region = Region::new(compositor)
             .map_err(|err| WaylandError::ShmPool(format!("Failed updating input region: {err}")))?;
         region.add(
@@ -590,8 +459,6 @@ impl OverlayScene
         self.parent_layer
             .wl_surface()
             .set_input_region(Some(region.wl_region()));
-
-        self.parent_layer.wl_surface().commit();
         Ok(())
     }
 
@@ -604,77 +471,4 @@ impl OverlayScene
     {
         self.chrome.sync_handle(layout.input_rect(false), input)
     }
-}
-
-/// Target SHM buffer dimensions and optional `display_cache` signature for a frame render.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BufferTargetSpec
-{
-    // Target buffer width in physical pixels.
-    width: u32,
-
-    // Target buffer height in physical pixels.
-    height: u32,
-
-    // Cache signature when display-sized caching applies (`None` when streaming raw source frames).
-    cache_key: Option<DisplayCacheKey>,
-}
-
-/// Scales `logical` by `buf_scale`, clamping each axis cleanly into `1..=max_size`.
-fn clamped_physical_size(logical: (u32, u32), buf_scale: u32, max_size: (u32, u32)) -> (u32, u32)
-{
-    (
-        logical.0.saturating_mul(buf_scale).clamp(1, max_size.0),
-        logical.1.saturating_mul(buf_scale).clamp(1, max_size.1),
-    )
-}
-
-/// Sizes `frame_ring` to `(target_w, target_h)` when needed, runs `fill`, and returns any retired ring.
-fn with_target_ring(
-    frame_ring: &mut ImageBufferRing,
-    shm: &Shm,
-    target_w: u32,
-    target_h: u32,
-    fill: impl FnOnce(&mut ImageBufferRing) -> Result<(), OverlayError>,
-) -> Result<Option<ImageBufferRing>, OverlayError>
-{
-    if frame_ring.dimensions() != (target_w, target_h)
-    {
-        let mut replacement = ImageBufferRing::new(shm, target_w, target_h)?;
-        fill(&mut replacement)?;
-        return Ok(Some(std::mem::replace(frame_ring, replacement)));
-    }
-
-    fill(frame_ring)?;
-    Ok(None)
-}
-
-/// Writes `frame_argb` directly into an SHM slot of `ring` (raw copy or fractional rotation).
-fn fill_ring_slot(
-    ring: &mut ImageBufferRing,
-    surface: &WlSurface,
-    layout: &OverlayLayout,
-    frame_argb: &[u8],
-) -> Result<(), OverlayError>
-{
-    if layout.quarter_turn().is_some()
-    {
-        return ring.upload_and_attach(surface, frame_argb);
-    }
-
-    let (frame_w, frame_h) = layout.frame_size();
-    let (dst_w, dst_h) = ring.dimensions();
-    ring.fill_and_attach(surface, |canvas| {
-        rotate_argb8888_into(
-            frame_argb,
-            frame_w,
-            frame_h,
-            layout.rotation(),
-            layout.flipped(),
-            dst_w,
-            dst_h,
-            canvas,
-        )
-        .map_err(OverlayError::from)
-    })
 }

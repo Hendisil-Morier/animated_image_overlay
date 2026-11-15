@@ -15,6 +15,9 @@ pub mod chrome_raster;
 // Bounded in-memory display-resolution `ARGB8888` frame cache.
 pub mod display_cache;
 
+// Display-resolution frame scaling, rotation, and SHM ring staging pipeline.
+pub mod frame_stage;
+
 // SCTK and raw Wayland protocol dispatch implementations for `OverlayRuntime`.
 pub mod handlers;
 
