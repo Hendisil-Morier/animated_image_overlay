@@ -49,7 +49,7 @@ Edit-mode keyboard shortcuts:
 - `q`: Quit cleanly.
 - Arrow keys or `h` / `j` / `k` / `l`: Nudge position by `10 px`.
 - `+` / `=` / `-`: Step scale up or down.
-- `r` / `R`: Rotate 90 degrees clockwise or counter-clockwise (per-session only).
+- `r` / `R`: Rotate 90 degrees clockwise or counter-clockwise.
 - `Space`: Pause or resume animation playback.
 
 Signals:
@@ -57,7 +57,7 @@ Signals:
 
 ## Configuration, Cache, and Logs
 
-- `~/.config/apng-overlay.json`: Stores `x`, `y`, and `scale` per canonical absolute file path using 500 ms debounced writes guarded by an exclusive `flock` on `~/.config/apng-overlay.json.lock` and atomic temp-file replacement.
+- `~/.config/apng-overlay.json`: Stores `x`, `y`, `scale`, and `rotation` (`0`, `90`, `180`, or `270`) per canonical absolute file path using 500 ms debounced writes guarded by an exclusive `flock` on `~/.config/apng-overlay.json.lock` and atomic temp-file replacement.
 - `~/.cache/apng-overlay/`: Stores `lz4_flex`-compressed premultiplied `ARGB8888` chunks (`.lraw`) and `.json` metadata written strictly after `.lraw`. Frame 0 displays immediately while remaining frames stream in the background. Active cache entries refresh timestamps on hits, entries older than 30 days (`.json`, `.raw`, `.zraw`, `.lraw`) are pruned automatically at startup, and uncompressed frames remain cached in RAM up to a 128 MiB LRU budget.
 - `~/.cache/apng-overlay/logs/`: Daily rotating log files (`apng-overlay.*.log`, retaining up to 7 files).
 
