@@ -207,13 +207,12 @@ fn cache_prune_removes_stale_files_and_refreshes_recent_hits()
 }
 
 #[test]
-fn cache_enforces_ram_lru_budget_and_decompresses_on_eviction()
+fn cache_skips_uncompressed_ram_and_streams_lraw_when_animation_exceeds_budget()
 {
     let temp = TempCacheTestDir::new("ram_budget");
     let img_path = temp.path().join("anim.gif");
     let cache_dir = temp.path().join("cache");
-    // 10x10 ARGB8888 = 400 bytes per frame; 5 frames = 2000 bytes total.
-    // Setting budget = 800 bytes keeps at most 2 uncompressed frames in RAM!
+    // 10x10 ARGB8888 = 400 bytes per frame; 5 frames = 2000 bytes total (> 800-byte budget).
     create_animated_gif(&img_path, 5, 10, 10);
 
     let mut store = FrameCache::open_in_dir(&img_path, 500, 0, &cache_dir, 800, 30, None)
@@ -223,17 +222,106 @@ fn cache_enforces_ram_lru_budget_and_decompresses_on_eviction()
         std::thread::sleep(Duration::from_millis(5));
     }
 
-    for idx in 0..5
+    assert_eq!(store.ram_used_bytes(), 0);
+    assert_eq!(store.compressed_ram_bytes(), 0);
+
+    for _pass in 0..2
     {
-        let frame = store
-            .frame_argb(idx)
-            .expect("frame decompresses via LRU/LZ4");
-        assert_eq!(frame.len(), 400);
-        assert!(store.ram_used_bytes() <= 800);
+        for idx in 0..5
+        {
+            let byte_len = store
+                .with_frame_argb(idx, |bytes| bytes.len())
+                .expect("frame streams cleanly from .lraw");
+            assert_eq!(byte_len, 400);
+            assert_eq!(store.ram_used_bytes(), 0);
+            assert_eq!(store.compressed_ram_bytes(), 0);
+        }
+    }
+    store.stop();
+
+    // Synchronous `is_decode_done` and zero compressed heap confirm warm `.lraw` hit.
+    let mut warm = FrameCache::open_in_dir(&img_path, 500, 0, &cache_dir, 800, 30, None)
+        .expect("warm cache should open synchronously");
+    assert!(warm.is_decode_done());
+    assert_eq!(warm.frame_count(), 5);
+    assert_eq!(warm.ram_used_bytes(), 0);
+    assert_eq!(warm.compressed_ram_bytes(), 0);
+
+    for _pass in 0..2
+    {
+        for idx in 0..5
+        {
+            let byte_len = warm
+                .with_frame_argb(idx, |bytes| bytes.len())
+                .expect("warm frame streams from .lraw across repeated passes");
+            assert_eq!(byte_len, 400);
+            assert_eq!(warm.ram_used_bytes(), 0);
+            assert_eq!(warm.compressed_ram_bytes(), 0);
+        }
+    }
+    warm.stop();
+}
+
+#[test]
+fn cache_populates_ram_lazily_when_animation_fits_budget()
+{
+    let temp = TempCacheTestDir::new("ram_fit");
+    let img_path = temp.path().join("anim.gif");
+    let cache_dir = temp.path().join("cache");
+    // 10x10 ARGB8888 = 400 bytes per frame; 5 frames = 2000 bytes exact budget fit.
+    create_animated_gif(&img_path, 5, 10, 10);
+
+    let mut store = FrameCache::open_in_dir(&img_path, 500, 0, &cache_dir, 2000, 30, None)
+        .expect("cache should open");
+    while !store.is_decode_done()
+    {
+        std::thread::sleep(Duration::from_millis(5));
     }
 
-    assert_eq!(store.ram_used_bytes(), 800);
+    assert_eq!(store.compressed_ram_bytes(), 0);
+    assert_eq!(store.ram_used_bytes(), 400);
+
+    for idx in 1..5
+    {
+        let frame = store.frame_argb(idx).expect("pass 1 populates LRU lazily");
+        assert_eq!(frame.len(), 400);
+        assert_eq!(store.ram_used_bytes(), (idx + 1) * 400);
+    }
     store.stop();
+
+    // Reopen warm cache fitting in RAM, populate on pass 1, then remove `.lraw` for pass 2.
+    let mut warm = FrameCache::open_in_dir(&img_path, 500, 0, &cache_dir, 2000, 30, None)
+        .expect("warm cache should open");
+    assert!(warm.is_decode_done());
+    assert_eq!(warm.compressed_ram_bytes(), 0);
+    assert_eq!(warm.ram_used_bytes(), 400);
+
+    for idx in 1..5
+    {
+        let byte_len = warm
+            .with_frame_argb(idx, |bytes| bytes.len())
+            .expect("pass 1 warms RAM slot from disk");
+        assert_eq!(byte_len, 400);
+    }
+    assert_eq!(warm.ram_used_bytes(), 2000);
+
+    for entry in std::fs::read_dir(&cache_dir).expect("read cache dir")
+    {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("lraw")
+        {
+            std::fs::remove_file(path).expect("remove .lraw after pass 1");
+        }
+    }
+
+    for idx in 0..5
+    {
+        let byte_len = warm
+            .with_frame_argb(idx, |bytes| bytes.len())
+            .expect("pass 2 serves directly from RAM without .lraw");
+        assert_eq!(byte_len, 400);
+    }
+    warm.stop();
 }
 
 #[test]

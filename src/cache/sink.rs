@@ -7,10 +7,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-// Cache disk writers, shared frame buffer state, and decoder stream traits.
+// Cache disk writers, shared frame buffer state, lazy `.lraw` reader, and decoder stream traits.
 use super::{
     disk::{CachePaths, prune_cache, write_cache_metadata},
-    memory::{SharedFrames, WakeupCallback, append_batch, lock_mutex},
+    memory::{SharedFrames, WakeupCallback, append_batch, finish_with_disk, lock_mutex},
+    reader::{FrameScratch, LrawReader, build_chunk_spans},
 };
 use crate::{
     atomic_fs::AtomicTempFile,
@@ -41,6 +42,9 @@ pub(crate) struct DecodeCacheSink
 
     // Shared frame state owned jointly with `FrameCache`.
     shared: Option<Arc<Mutex<SharedFrames>>>,
+
+    // Decompression workspace receiving the committed `.lraw` reader when cold decode finishes.
+    scratch: Arc<Mutex<FrameScratch>>,
 
     // Active uncommitted `.lraw` temporary writer (auto-removed on drop/abort).
     temp_lraw: Option<AtomicTempFile>,
@@ -73,6 +77,7 @@ impl DecodeCacheSink
         prune_age_days: u64,
         ram_budget_bytes: usize,
         shared_handoff: Arc<Mutex<Option<Arc<Mutex<SharedFrames>>>>>,
+        scratch: Arc<Mutex<FrameScratch>>,
         wakeup: Option<WakeupCallback>,
     ) -> Self
     {
@@ -83,6 +88,7 @@ impl DecodeCacheSink
             ram_budget_bytes,
             shared_handoff,
             shared: None,
+            scratch,
             temp_lraw: None,
             width: 0,
             height: 0,
@@ -163,9 +169,10 @@ impl FrameStreamSink for DecodeCacheSink
         Ok(())
     }
 
-    /// Commits `.lraw` before `.json` when completed cleanly, or drops `.tmp-*.lraw` on abort.
+    /// Commits `.lraw` before `.json` when completed cleanly and transitions playback to disk spans.
     fn on_finish(mut self: Box<Self>, cancelled: bool, result: Result<(), CacheError>)
     {
+        let mut committed_disk = None;
         if !cancelled
             && result.is_ok()
             && !self.all_sizes.is_empty()
@@ -185,6 +192,16 @@ impl FrameStreamSink for DecodeCacheSink
             {
                 tracing::warn!(error = %err, "Failed writing .json cache metadata");
             }
+            else if let Ok(spans) = build_chunk_spans(&self.paths.lraw_path, &self.all_sizes)
+                .inspect_err(|err| {
+                    tracing::warn!(error = %err, "Failed indexing committed .lraw chunk spans");
+                })
+                && let Ok(reader) = LrawReader::open(&self.paths.lraw_path).inspect_err(|err| {
+                    tracing::warn!(error = %err, "Failed opening committed .lraw for streaming");
+                })
+            {
+                committed_disk = Some((spans, reader));
+            }
         }
         else
         {
@@ -192,7 +209,16 @@ impl FrameStreamSink for DecodeCacheSink
             drop(self.temp_lraw.take());
         }
 
-        if let Some(shared) = &self.shared
+        if let Some((spans, reader)) = committed_disk
+        {
+            // Publish the open reader before `disk_spans` so every consumer seeing spans has a live handle.
+            lock_mutex(&self.scratch).lraw = Some(reader);
+            if let Some(shared) = &self.shared
+            {
+                finish_with_disk(shared, &mut self.pending_batch, spans, self.wakeup.as_ref());
+            }
+        }
+        else if let Some(shared) = &self.shared
         {
             append_batch(shared, &mut self.pending_batch, true, self.wakeup.as_ref());
         }

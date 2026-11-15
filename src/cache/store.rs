@@ -11,14 +11,11 @@ use std::{
     thread::JoinHandle,
 };
 
-// Decompression for cached premultiplied `ARGB8888` frame buffers on RAM misses.
-use lz4_flex::decompress_size_prepended;
-
-// Internal cache disk helpers, RAM LRU state, warm reader, and decode sink.
+// Internal cache disk helpers, RAM LRU state, lazy reader, and decode sink.
 use super::{
     disk::{DEFAULT_PRUNE_AGE_DAYS, compute_cache_paths, default_cache_dir, prune_cache},
-    memory::{DEFAULT_RAM_CACHE_BUDGET_BYTES, SharedFrames, WakeupCallback, lock_mutex},
-    reader::try_open_cached_store,
+    memory::{ChunkSpan, DEFAULT_RAM_CACHE_BUDGET_BYTES, SharedFrames, WakeupCallback, lock_mutex},
+    reader::{FrameScratch, decompress_chunk_into, try_open_cached_store},
     sink::DecodeCacheSink,
 };
 use crate::{
@@ -26,19 +23,22 @@ use crate::{
     error::{CacheError, OverlayError},
 };
 
-/// Manages source/disk cache loading, background streaming, LRU RAM caching, and pruning.
+/// Manages source/disk cache loading, lazy chunk streaming, conditional RAM caching, and pruning.
 pub struct FrameCache
 {
     // Directory storing `<hash>.lraw` and `<hash>.json` cache pairs.
     cache_dir: PathBuf,
 
-    // Synchronized compressed + uncompressed frame store.
+    // Synchronized frame metadata, chunk spans, and conditional RAM cache.
     shared: Arc<Mutex<SharedFrames>>,
+
+    // Reusable `.lraw` reader and decompression workspace kept separate from `shared`.
+    scratch: Arc<Mutex<FrameScratch>>,
 
     // Cancellation signal stopping worker threads cleanly on exit.
     cancel: Arc<AtomicBool>,
 
-    // Join handle for active background decoding or cache streaming thread.
+    // Join handle for active background source decoding thread.
     worker: Option<JoinHandle<()>>,
 }
 
@@ -84,13 +84,13 @@ impl FrameCache
         let paths = compute_cache_paths(&cache_dir, image_path, base_width, max_frames)?;
         let cancel = Arc::new(AtomicBool::new(false));
 
-        if let Some(cached) =
-            try_open_cached_store(&paths, ram_budget_bytes, &cancel, wakeup.clone())
+        if let Some(cached) = try_open_cached_store(&paths, ram_budget_bytes, &cancel)
         {
             prune_cache(&cache_dir, prune_age_days);
             return Ok(cached);
         }
 
+        let scratch = Arc::new(Mutex::new(FrameScratch::default()));
         let shared_slot: Arc<Mutex<Option<Arc<Mutex<SharedFrames>>>>> = Arc::new(Mutex::new(None));
         let sink = Box::new(DecodeCacheSink::new(
             paths,
@@ -98,6 +98,7 @@ impl FrameCache
             prune_age_days,
             ram_budget_bytes,
             Arc::clone(&shared_slot),
+            Arc::clone(&scratch),
             wakeup,
         ));
 
@@ -138,6 +139,7 @@ impl FrameCache
         Ok(Self {
             cache_dir,
             shared,
+            scratch,
             cancel,
             worker,
         })
@@ -147,6 +149,7 @@ impl FrameCache
     pub(crate) fn from_parts(
         cache_dir: PathBuf,
         shared: Arc<Mutex<SharedFrames>>,
+        scratch: Arc<Mutex<FrameScratch>>,
         cancel: Arc<AtomicBool>,
         worker: Option<JoinHandle<()>>,
     ) -> Self
@@ -154,6 +157,7 @@ impl FrameCache
         Self {
             cache_dir,
             shared,
+            scratch,
             cancel,
             worker,
         }
@@ -179,10 +183,10 @@ impl FrameCache
         visit(&guard.delays_ms, guard.decode_done)
     }
 
-    /// Returns total number of frames currently available in memory.
+    /// Returns total number of frames currently known for playback.
     pub fn frame_count(&self) -> usize
     {
-        lock_mutex(&self.shared).compressed_frames.len()
+        lock_mutex(&self.shared).delays_ms.len()
     }
 
     /// Returns `true` when background streaming or decoding has completed.
@@ -197,18 +201,50 @@ impl FrameCache
         lock_mutex(&self.shared).ram_used_bytes
     }
 
-    /// Retrieves premultiplied `ARGB8888` pixel data for `index`, decompressing via LZ4 on RAM misses.
-    pub fn frame_argb(&self, index: usize) -> Result<Arc<Vec<u8>>, OverlayError>
+    /// Returns compressed chunk bytes currently retained in heap RAM.
+    pub fn compressed_ram_bytes(&self) -> usize
     {
-        let (compressed, expected_len) = {
+        lock_mutex(&self.shared).compressed_ram_bytes()
+    }
+
+    /// Streams or reads premultiplied `ARGB8888` pixel data for `index` into `visit` without copying on disk hits.
+    pub fn with_frame_argb<R>(
+        &self,
+        index: usize,
+        visit: impl FnOnce(&[u8]) -> R,
+    ) -> Result<R, OverlayError>
+    {
+        // Identifies whether the frame chunk lives temporarily in heap RAM or inside committed `.lraw`.
+        enum ChunkSource
+        {
+            Memory(Vec<u8>),
+            Disk(ChunkSpan),
+        }
+
+        let (source, expected_len, allow_ram_cache) = {
             let mut guard = lock_mutex(&self.shared);
             if let Some(hit) = guard.ram_slots.get(&index).map(Arc::clone)
             {
                 guard.promote_lru(index);
-                return Ok(hit);
+                drop(guard);
+                return Ok(visit(&hit));
+            }
+            if index == 0
+                && let Some(frame0) = guard.initial_frame0.take()
+            {
+                drop(guard);
+                return Ok(visit(&frame0));
             }
 
-            let Some(chunk) = guard.compressed_frames.get(index)
+            let fits = guard.fits_ram_budget();
+            let source = if let Some(&span) = guard.disk_spans.get(index)
+            {
+                ChunkSource::Disk(span)
+            }
+            else if let Some(chunk) = guard.compressed_frames.get(index)
+            {
+                ChunkSource::Memory(chunk.clone())
+            }
             else
             {
                 return Err(CacheError::CorruptMetadata {
@@ -217,32 +253,66 @@ impl FrameCache
                 }
                 .into());
             };
-            (chunk.clone(), guard.frame_byte_len)
+            (source, guard.frame_byte_len, fits)
         };
 
-        let raw = decompress_size_prepended(&compressed).map_err(|err| CacheError::Codec {
-            path: self.cache_dir.clone(),
-            frame_index: index,
-            reason: err.to_string(),
-        })?;
-
-        if raw.len() != expected_len
-        {
-            return Err(CacheError::Codec {
-                path: self.cache_dir.clone(),
-                frame_index: index,
-                reason: format!(
-                    "Decompressed byte length {} did not match expected {expected_len}",
-                    raw.len()
-                ),
+        let cached_slot = {
+            let mut scratch = lock_mutex(&self.scratch);
+            let scratch = &mut *scratch;
+            match source
+            {
+                ChunkSource::Disk(span) =>
+                {
+                    let Some(reader) = scratch.lraw.as_mut()
+                    else
+                    {
+                        return Err(CacheError::CorruptMetadata {
+                            path: self.cache_dir.clone(),
+                            reason: format!(
+                                "Missing .lraw reader while accessing frame index {index}"
+                            ),
+                        }
+                        .into());
+                    };
+                    let err_path = reader.path().to_path_buf();
+                    let chunk = reader.read_chunk(span)?;
+                    decompress_chunk_into(
+                        &err_path,
+                        index,
+                        chunk,
+                        expected_len,
+                        &mut scratch.argb,
+                    )?;
+                }
+                ChunkSource::Memory(chunk) =>
+                {
+                    decompress_chunk_into(
+                        &self.cache_dir,
+                        index,
+                        &chunk,
+                        expected_len,
+                        &mut scratch.argb,
+                    )?;
+                }
             }
-            .into());
-        }
 
-        let arc = Arc::new(raw);
+            let result = visit(&scratch.argb);
+            if !allow_ram_cache
+            {
+                return Ok(result);
+            }
+            (result, Arc::new(scratch.argb.clone()))
+        };
+
         let mut guard = lock_mutex(&self.shared);
-        guard.insert_ram_frame(index, Arc::clone(&arc));
-        Ok(arc)
+        guard.insert_ram_frame(index, cached_slot.1);
+        Ok(cached_slot.0)
+    }
+
+    /// Retrieves premultiplied `ARGB8888` pixel data for `index`, decompressing via LZ4 on RAM misses.
+    pub fn frame_argb(&self, index: usize) -> Result<Arc<Vec<u8>>, OverlayError>
+    {
+        self.with_frame_argb(index, |bytes| Arc::new(bytes.to_vec()))
     }
 
     /// Signals background worker cancellation and joins its thread cleanly.

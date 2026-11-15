@@ -1,37 +1,184 @@
-//! Warm `.lraw` disk cache reader loading frame 0 synchronously and streaming remaining chunks.
+//! Warm `.lraw` disk cache reader loading frame 0 synchronously and streaming frames lazily on demand.
 
-// Filesystem reading, seeking, worker threads, and cancellation atomics.
+// Filesystem reading, positional pread I/O, reusable staging buffers, and cancellation state.
 use std::{
     fs::File,
-    io::{Read, Seek, SeekFrom},
-    path::Path,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread,
+    os::unix::fs::FileExt,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, atomic::AtomicBool},
 };
 
-// Decompression for initial frame 0 verification on cache open.
-use lz4_flex::decompress_size_prepended;
+// Direct LZ4 block header parsing and zero-allocation decompression into reusable buffers.
+use lz4_flex::block::{decompress_into, uncompressed_size};
 
-// Shared cache metadata, memory batch helpers, frame store constructor, and dimension checks.
+// Shared cache metadata, chunk span records, memory lock helpers, and frame store constructor.
 use super::{
-    disk::{CacheMetadata, CachePaths, load_and_validate_meta, touch_modified},
-    memory::{SharedFrames, WakeupCallback, append_batch, mark_decode_done},
+    disk::{CachePaths, load_and_validate_meta, touch_modified},
+    memory::{ChunkSpan, SharedFrames},
     store::FrameCache,
 };
 use crate::{decode::checked_argb_byte_len, error::CacheError, playback::MIN_FRAME_DELAY_MS};
 
-// Batch threshold for flushing streamed cache-hit frames into shared state.
-const CACHE_HIT_BATCH_SIZE: usize = 16;
+/// Random-access `.lraw` chunk reader reusing a single compressed byte buffer across frames.
+pub(crate) struct LrawReader
+{
+    // On-disk `.lraw` path preserved for contextual I/O error reporting.
+    lraw_path: PathBuf,
 
-/// Validates and loads cached frame 0 from `.json` + `.lraw`, spawning streamer for frames `1..`.
+    // Open read-only handle used for offset-addressed chunk reads (`pread`).
+    file: File,
+
+    // Reusable compressed staging buffer grown lazily up to the largest requested chunk.
+    read_buf: Vec<u8>,
+}
+
+impl LrawReader
+{
+    /// Opens a committed `.lraw` file at `path` for lazy per-frame chunk reading.
+    pub(crate) fn open(path: &Path) -> Result<Self, CacheError>
+    {
+        let file = File::open(path).map_err(|source| CacheError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(Self {
+            lraw_path: path.to_path_buf(),
+            file,
+            read_buf: Vec::new(),
+        })
+    }
+
+    /// Exposes the `.lraw` file path backing this reader for diagnostics.
+    pub(crate) fn path(&self) -> &Path
+    {
+        &self.lraw_path
+    }
+
+    /// Reads the compressed LZ4 chunk at `span` using positional I/O without seeking.
+    pub(crate) fn read_chunk(&mut self, span: ChunkSpan) -> Result<&[u8], CacheError>
+    {
+        if self.read_buf.len() < span.len
+        {
+            self.read_buf.resize(span.len, 0);
+        }
+        let target = &mut self.read_buf[..span.len];
+        self.file
+            .read_exact_at(target, span.offset)
+            .map_err(|source| CacheError::Io {
+                path: self.lraw_path.clone(),
+                source,
+            })?;
+        Ok(target)
+    }
+}
+
+/// Reusable decompression workspace serialized independently of `SharedFrames` during frame reads.
+#[derive(Default)]
+pub(crate) struct FrameScratch
+{
+    /// Active `.lraw` chunk reader once disk storage is committed or loaded warm.
+    pub(crate) lraw: Option<LrawReader>,
+
+    /// Reusable premultiplied `ARGB8888` pixel buffer avoiding per-frame allocations on RAM misses.
+    pub(crate) argb: Vec<u8>,
+}
+
+impl FrameScratch
+{
+    /// Wraps an already-validated `.lraw` reader for synchronous warm cache hits.
+    pub(crate) fn with_reader(lraw: LrawReader) -> Self
+    {
+        Self {
+            lraw: Some(lraw),
+            argb: Vec::new(),
+        }
+    }
+}
+
+/// Builds sequential `(offset, len)` byte spans from per-frame chunk sizes in `.json`.
+pub(crate) fn build_chunk_spans(
+    lraw_path: &Path,
+    sizes: &[usize],
+) -> Result<Vec<ChunkSpan>, CacheError>
+{
+    let mut spans = Vec::with_capacity(sizes.len());
+    let mut offset = 0_u64;
+    for &len in sizes
+    {
+        let len_u64 = u64::try_from(len).map_err(|_| CacheError::CorruptMetadata {
+            path: lraw_path.to_path_buf(),
+            reason: format!("Chunk length {len} overflowed offset calculation"),
+        })?;
+        spans.push(ChunkSpan { offset, len });
+        offset = offset
+            .checked_add(len_u64)
+            .ok_or_else(|| CacheError::CorruptMetadata {
+                path: lraw_path.to_path_buf(),
+                reason: String::from("Total .lraw byte offset overflowed u64"),
+            })?;
+    }
+    Ok(spans)
+}
+
+/// Decompresses a size-prepended LZ4 chunk directly into `output` and verifies exact byte length.
+pub(crate) fn decompress_chunk_into(
+    err_path: &Path,
+    frame_index: usize,
+    chunk: &[u8],
+    expected_len: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), CacheError>
+{
+    let (declared_len, block_payload) =
+        uncompressed_size(chunk).map_err(|err| CacheError::Codec {
+            path: err_path.to_path_buf(),
+            frame_index,
+            reason: err.to_string(),
+        })?;
+
+    if declared_len != expected_len
+    {
+        return Err(CacheError::Codec {
+            path: err_path.to_path_buf(),
+            frame_index,
+            reason: format!(
+                "Declared LZ4 length {declared_len} did not match expected {expected_len}"
+            ),
+        });
+    }
+
+    if output.len() != expected_len
+    {
+        output.resize(expected_len, 0);
+    }
+
+    let written = decompress_into(block_payload, &mut output[..expected_len]).map_err(|err| {
+        CacheError::Codec {
+            path: err_path.to_path_buf(),
+            frame_index,
+            reason: err.to_string(),
+        }
+    })?;
+
+    if written != expected_len
+    {
+        return Err(CacheError::Codec {
+            path: err_path.to_path_buf(),
+            frame_index,
+            reason: format!(
+                "Decompressed byte length {written} did not match expected {expected_len}"
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+/// Validates `.json` + frame 0 from `.lraw` and opens a zero-thread lazy disk-backed `FrameCache`.
 pub(crate) fn try_open_cached_store(
     paths: &CachePaths,
     ram_budget_bytes: usize,
     cancel: &Arc<AtomicBool>,
-    wakeup: Option<WakeupCallback>,
 ) -> Option<FrameCache>
 {
     if !paths.meta_path.is_file() || !paths.lraw_path.is_file()
@@ -49,22 +196,34 @@ pub(crate) fn try_open_cached_store(
         .inspect_err(|err| tracing::warn!(error = %err, "Ignoring overflowed cached dimensions"))
         .ok()?;
 
-    let (first_compressed, first_raw) = read_verified_frame0(paths, &meta, frame_byte_len)?;
+    let spans = build_chunk_spans(&paths.lraw_path, &meta.sizes)
+        .inspect_err(|err| tracing::warn!(error = %err, "Ignoring invalid cached chunk spans"))
+        .ok()?;
+
+    let mut reader = LrawReader::open(&paths.lraw_path)
+        .inspect_err(|err| tracing::warn!(error = %err, "Failed opening .lraw cache file"))
+        .ok()?;
+
+    let first_raw = read_verified_frame0(&mut reader, spans[0], frame_byte_len)?;
 
     touch_modified(&paths.meta_path);
     touch_modified(&paths.lraw_path);
 
-    let single_frame = meta.delays.len() <= 1;
-    let shared = SharedFrames::with_first_frame(
+    let delays_ms: Vec<u32> = meta
+        .delays
+        .iter()
+        .map(|&delay| delay.max(MIN_FRAME_DELAY_MS))
+        .collect();
+    let shared = SharedFrames::with_warm_disk(
         meta.w,
         meta.h,
         frame_byte_len,
         ram_budget_bytes,
-        first_compressed,
-        meta.delays[0].max(MIN_FRAME_DELAY_MS),
+        spans,
+        delays_ms,
         first_raw,
-        single_frame,
     );
+    let scratch = Arc::new(Mutex::new(FrameScratch::with_reader(reader)));
 
     let cache_dir = paths
         .lraw_path
@@ -72,129 +231,46 @@ pub(crate) fn try_open_cached_store(
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
 
-    if single_frame
-    {
-        return Some(FrameCache::from_parts(
-            cache_dir,
-            shared,
-            Arc::clone(cancel),
-            None,
-        ));
-    }
-
-    let shared_worker = Arc::clone(&shared);
-    let cancel_worker = Arc::clone(cancel);
-    let lraw_path = paths.lraw_path.clone();
-
     tracing::debug!(
         frames = meta.delays.len(),
         w = meta.w,
         h = meta.h,
-        "Loaded overlay frame 0 from cache"
+        "Opened warm lazy .lraw cache"
     );
-
-    let worker = thread::Builder::new()
-        .name(String::from("aiw-cache-reader"))
-        .spawn(move || {
-            stream_cached_chunks(&lraw_path, meta, shared_worker, cancel_worker, wakeup);
-        })
-        .ok()?;
 
     Some(FrameCache::from_parts(
         cache_dir,
         shared,
+        scratch,
         Arc::clone(cancel),
-        Some(worker),
+        None,
     ))
 }
 
-/// Reads and LZ4-decompresses frame 0 from `.lraw`, validating uncompressed byte length.
+/// Reads and LZ4-decompresses frame 0 from `.lraw`, verifying exact uncompressed byte length.
 fn read_verified_frame0(
-    paths: &CachePaths,
-    meta: &CacheMetadata,
+    reader: &mut LrawReader,
+    span0: ChunkSpan,
     expected_len: usize,
-) -> Option<(Vec<u8>, Vec<u8>)>
+) -> Option<Vec<u8>>
 {
-    let mut file = File::open(&paths.lraw_path)
-        .inspect_err(|err| tracing::warn!(error = %err, "Failed opening .lraw cache file"))
-        .ok()?;
-
-    let mut compressed = vec![0_u8; meta.sizes[0]];
-    if let Err(err) = file.read_exact(&mut compressed)
+    let err_path = reader.path().to_path_buf();
+    let chunk0 = match reader.read_chunk(span0)
     {
-        tracing::warn!(error = %err, "Failed reading frame 0 from .lraw cache");
+        Ok(chunk) => chunk,
+        Err(err) =>
+        {
+            tracing::warn!(error = %err, "Failed reading frame 0 from .lraw cache");
+            return None;
+        }
+    };
+
+    let mut raw = Vec::new();
+    if let Err(err) = decompress_chunk_into(&err_path, 0, chunk0, expected_len, &mut raw)
+    {
+        tracing::warn!(error = %err, "Cached frame 0 LZ4 decompression failed");
         return None;
     }
 
-    match decompress_size_prepended(&compressed)
-    {
-        Ok(raw) if raw.len() == expected_len => Some((compressed, raw)),
-        Ok(raw) =>
-        {
-            tracing::warn!(
-                actual = raw.len(),
-                expected = expected_len,
-                "Cached frame 0 decompressed size mismatch"
-            );
-            None
-        }
-        Err(err) =>
-        {
-            tracing::warn!(error = %err, "Cached frame 0 LZ4 decompression failed");
-            None
-        }
-    }
-}
-
-/// Streams remaining LZ4 frame chunks from `.lraw` in batches until completion or cancellation.
-fn stream_cached_chunks(
-    lraw_path: &Path,
-    meta: CacheMetadata,
-    shared: Arc<Mutex<SharedFrames>>,
-    cancel: Arc<AtomicBool>,
-    wakeup: Option<WakeupCallback>,
-)
-{
-    let result: Result<(), CacheError> = (|| {
-        let mut file = File::open(lraw_path).map_err(|source| CacheError::Io {
-            path: lraw_path.to_path_buf(),
-            source,
-        })?;
-        file.seek(SeekFrom::Start(meta.sizes[0] as u64))
-            .map_err(|source| CacheError::Io {
-                path: lraw_path.to_path_buf(),
-                source,
-            })?;
-
-        let mut batch = Vec::with_capacity(CACHE_HIT_BATCH_SIZE);
-        for (&size, &delay) in meta.sizes[1..].iter().zip(meta.delays[1..].iter())
-        {
-            if cancel.load(Ordering::Acquire)
-            {
-                return Ok(());
-            }
-
-            let mut chunk = vec![0_u8; size];
-            file.read_exact(&mut chunk)
-                .map_err(|source| CacheError::Io {
-                    path: lraw_path.to_path_buf(),
-                    source,
-                })?;
-            batch.push((chunk, delay.max(MIN_FRAME_DELAY_MS)));
-
-            if batch.len() >= CACHE_HIT_BATCH_SIZE
-            {
-                append_batch(&shared, &mut batch, false, wakeup.as_ref());
-            }
-        }
-
-        append_batch(&shared, &mut batch, true, wakeup.as_ref());
-        Ok(())
-    })();
-
-    if let Err(err) = result
-    {
-        tracing::warn!(error = %err, "Failed streaming remaining cached chunks");
-        mark_decode_done(&shared, wakeup.as_ref());
-    }
+    Some(raw)
 }

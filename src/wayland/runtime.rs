@@ -192,31 +192,28 @@ impl OverlayRuntime
     /// Fetches frame `idx` outside cache locks, uploads it to SHM, and requests a frame callback.
     fn present_frame_at(&mut self, idx: usize)
     {
-        let argb = match self.cache.frame_argb(idx)
-        {
-            Ok(argb) => argb,
-            Err(err) =>
-            {
-                tracing::warn!(error = %err, frame_index = idx, "Failed loading frame ARGB");
-                self.schedule_frame_timer(FRAME_ERROR_RETRY_MS);
-                return;
-            }
-        };
-
         let Some(scene) = &mut self.scene
         else
         {
             return;
         };
 
-        if let Err(err) = scene.stage_frame(&argb)
+        match self
+            .cache
+            .with_frame_argb(idx, |argb| scene.stage_frame(argb))
         {
-            tracing::warn!(error = %err, frame_index = idx, "Failed presenting frame");
-            self.schedule_frame_timer(FRAME_ERROR_RETRY_MS);
-            return;
+            Ok(Ok(())) => self.queue_image_frame_callback(),
+            Ok(Err(err)) =>
+            {
+                tracing::warn!(error = %err, frame_index = idx, "Failed presenting frame");
+                self.schedule_frame_timer(FRAME_ERROR_RETRY_MS);
+            }
+            Err(err) =>
+            {
+                tracing::warn!(error = %err, frame_index = idx, "Failed loading frame ARGB");
+                self.schedule_frame_timer(FRAME_ERROR_RETRY_MS);
+            }
         }
-
-        self.queue_image_frame_callback();
     }
 
     /// Cancels or schedules the `500 ms` debounced config save and `2000 ms` handle fade timer.
