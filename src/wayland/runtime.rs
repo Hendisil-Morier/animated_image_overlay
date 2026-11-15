@@ -198,19 +198,17 @@ impl OverlayRuntime
             return;
         };
 
-        match self
+        let staged = self
             .cache
-            .with_frame_argb(idx, |argb| scene.stage_frame(argb))
+            .with_frame_argb(idx, |argb| scene.stage_frame(&self.shm, &self.layout, argb))
+            .and_then(|inner| inner);
+
+        match staged
         {
-            Ok(Ok(())) => self.queue_image_frame_callback(),
-            Ok(Err(err)) =>
-            {
-                tracing::warn!(error = %err, frame_index = idx, "Failed presenting frame");
-                self.schedule_frame_timer(FRAME_ERROR_RETRY_MS);
-            }
+            Ok(_retired_ring) => self.queue_image_frame_callback(),
             Err(err) =>
             {
-                tracing::warn!(error = %err, frame_index = idx, "Failed loading frame ARGB");
+                tracing::warn!(error = %err, frame_index = idx, "Failed presenting frame");
                 self.schedule_frame_timer(FRAME_ERROR_RETRY_MS);
             }
         }
@@ -232,7 +230,31 @@ impl OverlayRuntime
 
         if let Some(scene) = &mut self.scene
         {
-            if effects.layout_changed || effects.edit_mode_changed.is_some()
+            if effects.frame_redraw_needed
+            {
+                let frame_idx = self.playback.current_index();
+                let refreshed = self
+                    .cache
+                    .with_frame_argb(frame_idx, |argb| {
+                        scene.refresh_oriented_frame(
+                            &self.compositor,
+                            &self.shm,
+                            &self.layout,
+                            &self.input,
+                            argb,
+                        )
+                    })
+                    .and_then(|inner| inner);
+                if let Err(err) = refreshed
+                {
+                    tracing::warn!(
+                        error = %err,
+                        frame_index = frame_idx,
+                        "Failed refreshing rotated Wayland frame"
+                    );
+                }
+            }
+            else if effects.layout_changed || effects.edit_mode_changed.is_some()
             {
                 if let Err(err) =
                     scene.sync_layout(&self.compositor, &self.shm, &self.layout, &self.input)

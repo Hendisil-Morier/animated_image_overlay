@@ -22,6 +22,9 @@ pub const KEYBOARD_NUDGE_PX: f64 = 12.0;
 /// Equivalent scroll notches applied per keyboard `+`/`-` scale adjustment in edit mode.
 pub const KEYBOARD_ZOOM_STEP: f64 = 2.0;
 
+/// Tolerance within which a wrapped angle snaps onto an exact multiple of 90 degrees.
+const QUARTER_TURN_EPSILON_DEG: f64 = 1e-6;
+
 /// Direction of a discrete 90-degree overlay rotation step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RotateDirection
@@ -31,19 +34,6 @@ pub enum RotateDirection
 
     /// Turn 90 degrees counter-clockwise around the overlay center.
     CounterClockwise,
-}
-
-impl RotateDirection
-{
-    /// Returns the opposite quarter-turn direction (`Clockwise` <-> `CounterClockwise`).
-    pub const fn reversed(self) -> Self
-    {
-        match self
-        {
-            Self::Clockwise => Self::CounterClockwise,
-            Self::CounterClockwise => Self::Clockwise,
-        }
-    }
 }
 
 /// Visual mirror axis applied across the displayed overlay bounds.
@@ -57,7 +47,7 @@ pub enum FlipAxis
     Vertical,
 }
 
-/// Clockwise 90-degree orientation applied visually to the overlay surface.
+/// Discrete clockwise 90-degree orientation eligible for Wayland `wl_surface::set_buffer_transform`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Rotation
 {
@@ -75,37 +65,17 @@ pub enum Rotation
     Deg270,
 }
 
+/// Canonical quarter-turn targets mapped to discrete Wayland transform variants.
+const QUARTER_TURNS: [(f64, Rotation); 4] = [
+    (0.0, Rotation::Deg0),
+    (90.0, Rotation::Deg90),
+    (180.0, Rotation::Deg180),
+    (270.0, Rotation::Deg270),
+];
+
 impl Rotation
 {
-    /// Advances orientation by one quarter turn in `direction`.
-    pub const fn rotated(self, direction: RotateDirection) -> Self
-    {
-        match (self, direction)
-        {
-            (Self::Deg0, RotateDirection::Clockwise) => Self::Deg90,
-            (Self::Deg90, RotateDirection::Clockwise) => Self::Deg180,
-            (Self::Deg180, RotateDirection::Clockwise) => Self::Deg270,
-            (Self::Deg270, RotateDirection::Clockwise) => Self::Deg0,
-            (Self::Deg0, RotateDirection::CounterClockwise) => Self::Deg270,
-            (Self::Deg270, RotateDirection::CounterClockwise) => Self::Deg180,
-            (Self::Deg180, RotateDirection::CounterClockwise) => Self::Deg90,
-            (Self::Deg90, RotateDirection::CounterClockwise) => Self::Deg0,
-        }
-    }
-
-    /// Advances orientation by 180 degrees (`Deg0` <-> `Deg180`, `Deg90` <-> `Deg270`).
-    pub const fn rotated_half_turn(self) -> Self
-    {
-        match self
-        {
-            Self::Deg0 => Self::Deg180,
-            Self::Deg180 => Self::Deg0,
-            Self::Deg90 => Self::Deg270,
-            Self::Deg270 => Self::Deg90,
-        }
-    }
-
-    /// Returns `(width, height)` oriented for this rotation (`Deg90` and `Deg270` swap axes).
+    /// Returns `(width, height)` oriented for this quarter turn (`Deg90` and `Deg270` swap axes).
     pub const fn orient_dimensions(self, width: u32, height: u32) -> (u32, u32)
     {
         match self
@@ -114,31 +84,67 @@ impl Rotation
             Self::Deg90 | Self::Deg270 => (height, width),
         }
     }
+}
 
-    /// Returns the clockwise quarter-turn angle in degrees (`0`, `90`, `180`, or `270`).
-    pub const fn degrees(self) -> u16
+/// Matches an angle already wrapped into `[0.0, 360.0)` against canonical quarter turns.
+fn snap_quarter_turn(wrapped: f64) -> Option<(f64, Rotation)>
+{
+    if (360.0 - wrapped).abs() <= QUARTER_TURN_EPSILON_DEG
     {
-        match self
-        {
-            Self::Deg0 => 0,
-            Self::Deg90 => 90,
-            Self::Deg180 => 180,
-            Self::Deg270 => 270,
-        }
+        return Some((0.0, Rotation::Deg0));
     }
 
-    /// Converts an exact clockwise quarter-turn degree value (`0`, `90`, `180`, or `270`).
-    pub const fn from_degrees(degrees: u64) -> Option<Self>
+    QUARTER_TURNS
+        .into_iter()
+        .find(|&(target, _)| (wrapped - target).abs() <= QUARTER_TURN_EPSILON_DEG)
+}
+
+/// Wraps `angle_deg` into `[0.0, 360.0)`, falling back to `0.0` for non-finite inputs and snapping near-quarter turns.
+pub fn normalized_angle_deg(angle_deg: f64) -> f64
+{
+    if !angle_deg.is_finite()
     {
-        match degrees
-        {
-            0 => Some(Self::Deg0),
-            90 => Some(Self::Deg90),
-            180 => Some(Self::Deg180),
-            270 => Some(Self::Deg270),
-            _ => None,
-        }
+        return 0.0;
     }
+
+    let wrapped = angle_deg.rem_euclid(360.0);
+    snap_quarter_turn(wrapped).map_or(wrapped, |(target, _)| target)
+}
+
+/// Classifies `angle_deg` as a Wayland quarter turn when within floating-point snapping tolerance.
+pub fn exact_quarter_turn(angle_deg: f64) -> Option<Rotation>
+{
+    if !angle_deg.is_finite()
+    {
+        return None;
+    }
+
+    let wrapped = angle_deg.rem_euclid(360.0);
+    snap_quarter_turn(wrapped).map(|(_, rotation)| rotation)
+}
+
+/// Computes the integer pixel bounding box `(out_w, out_h)` enclosing `width x height` rotated by `angle_deg`.
+pub fn rotated_bounds(width: u32, height: u32, angle_deg: f64) -> (u32, u32)
+{
+    let w = width.max(1);
+    let h = height.max(1);
+    if let Some(quarter) = exact_quarter_turn(angle_deg)
+    {
+        return quarter.orient_dimensions(w, h);
+    }
+
+    let radians = normalized_angle_deg(angle_deg).to_radians();
+    let cos_a = radians.cos().abs();
+    let sin_a = radians.sin().abs();
+    let wf = f64::from(w);
+    let hf = f64::from(h);
+    let out_w = (wf * cos_a + hf * sin_a)
+        .ceil()
+        .clamp(1.0, f64::from(u32::MAX)) as u32;
+    let out_h = (wf * sin_a + hf * cos_a)
+        .ceil()
+        .clamp(1.0, f64::from(u32::MAX)) as u32;
+    (out_w, out_h)
 }
 
 /// Integer logical pixel rectangle aligned with Wayland surface-local input regions.
@@ -174,7 +180,7 @@ pub struct OverlayLayout
     // Active monitor height in logical pixels (minimum 1 px).
     screen_height: u32,
 
-    // Current position, scale, and 90-degree orientation subject to clamping.
+    // Current position, scale, and clockwise angle subject to clamping.
     state: OverlayState,
 }
 
@@ -214,18 +220,22 @@ impl OverlayLayout
         (self.frame_width, self.frame_height)
     }
 
-    /// Returns frame width and height swapped when rotated 90 or 270 degrees.
+    /// Returns unscaled frame bounding box dimensions after applying the active rotation angle.
     pub fn oriented_frame_size(&self) -> (u32, u32)
     {
-        self.state
-            .rotation
-            .orient_dimensions(self.frame_width, self.frame_height)
+        rotated_bounds(self.frame_width, self.frame_height, self.state.rotation)
     }
 
-    /// Returns the active 90-degree visual rotation.
-    pub fn rotation(&self) -> Rotation
+    /// Returns the active normalized clockwise rotation in degrees (`[0.0, 360.0)`).
+    pub fn rotation(&self) -> f64
     {
         self.state.rotation
+    }
+
+    /// Returns the matching discrete quarter-turn variant when `rotation()` aligns within epsilon.
+    pub fn quarter_turn(&self) -> Option<Rotation>
+    {
+        exact_quarter_turn(self.state.rotation)
     }
 
     /// Returns whether the overlay is horizontally mirrored after rotating by `rotation()`.
@@ -255,9 +265,10 @@ impl OverlayLayout
         (width, height)
     }
 
-    /// Clamps `scale` within `[min_scale, max_scale]` and `(x, y)` inside monitor bounds.
+    /// Clamps `scale` within `[min_scale, max_scale]`, normalizes `rotation`, and clamps `(x, y)` inside bounds.
     pub fn clamp(&mut self)
     {
+        self.state.rotation = normalized_angle_deg(self.state.rotation);
         let (eff_w, eff_h) = self.oriented_frame_size();
         let fw = f64::from(eff_w);
         let fh = f64::from(eff_h);
@@ -310,29 +321,41 @@ impl OverlayLayout
         self.clamp();
     }
 
-    /// Rotates the overlay visually by 90 degrees while keeping its center stationary inside bounds.
-    pub fn rotate(&mut self, direction: RotateDirection)
+    /// Rotates the overlay visually by `delta_deg` clockwise while keeping its center stationary inside bounds.
+    pub fn rotate_by(&mut self, delta_deg: f64)
     {
-        let (old_w, old_h) = self.overlay_size();
-        let cx = self.state.x + f64::from(old_w) * 0.5;
-        let cy = self.state.y + f64::from(old_h) * 0.5;
+        if !delta_deg.is_finite()
+        {
+            return;
+        }
 
         // Rotating a horizontally reflected view flips chirality under dihedral composition.
-        let effective_dir = if self.state.flipped
+        let effective_delta = if self.state.flipped
         {
-            direction.reversed()
+            -delta_deg
         }
         else
         {
-            direction
+            delta_deg
         };
-        self.state.rotation = self.state.rotation.rotated(effective_dir);
-        self.clamp();
+        self.apply_rotation(self.state.rotation + effective_delta);
+    }
 
-        let (new_w, new_h) = self.overlay_size();
-        self.state.x = cx - f64::from(new_w) * 0.5;
-        self.state.y = cy - f64::from(new_h) * 0.5;
-        self.clamp();
+    /// Rotates the overlay visually by 90 degrees while keeping its center stationary inside bounds.
+    pub fn rotate(&mut self, direction: RotateDirection)
+    {
+        let step = match direction
+        {
+            RotateDirection::Clockwise => 90.0,
+            RotateDirection::CounterClockwise => -90.0,
+        };
+        self.rotate_by(step);
+    }
+
+    /// Resets rotation back to `0.0` degrees upright while keeping the overlay center stationary.
+    pub fn reset_rotation(&mut self)
+    {
+        self.apply_rotation(0.0);
     }
 
     /// Mirrors the visual overlay across `axis` while leaving bounding box coordinates unchanged.
@@ -341,8 +364,24 @@ impl OverlayLayout
         self.state.flipped = !self.state.flipped;
         if axis == FlipAxis::Vertical
         {
-            self.state.rotation = self.state.rotation.rotated_half_turn();
+            self.state.rotation = normalized_angle_deg(self.state.rotation + 180.0);
         }
+    }
+
+    /// Applies `next_rotation`, preserves center coordinates across bound changes, and re-clamps.
+    fn apply_rotation(&mut self, next_rotation: f64)
+    {
+        let (old_w, old_h) = self.overlay_size();
+        let cx = self.state.x + f64::from(old_w) * 0.5;
+        let cy = self.state.y + f64::from(old_h) * 0.5;
+
+        self.state.rotation = normalized_angle_deg(next_rotation);
+        self.clamp();
+
+        let (new_w, new_h) = self.overlay_size();
+        self.state.x = cx - f64::from(new_w) * 0.5;
+        self.state.y = cy - f64::from(new_h) * 0.5;
+        self.clamp();
     }
 
     /// Applies vertical scroll wheel zooming (`scale *= 1.05 ** -dy`) and re-clamps.

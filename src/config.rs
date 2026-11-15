@@ -16,11 +16,11 @@ use std::{
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
-// Shared crash-safe atomic writer, rotation enum, XDG lookup helper, and domain errors.
+// Shared crash-safe atomic writer, angle normalizer, XDG lookup helper, and domain errors.
 use crate::{
     atomic_fs,
     error::{ConfigError, OverlayError},
-    layout::Rotation,
+    layout::normalized_angle_deg,
     xdg,
 };
 
@@ -49,13 +49,13 @@ pub struct OverlayState
     /// Display multiplier applied to the stored base frame dimensions.
     pub scale: f64,
 
-    /// Clockwise 90-degree orientation persisted as integer degrees (`0`, `90`, `180`, `270`).
+    /// Clockwise orientation persisted as normalized degrees in `[0.0, 360.0)`.
     #[serde(
         default,
         serialize_with = "serialize_rotation",
         deserialize_with = "deserialize_rotation"
     )]
-    pub rotation: Rotation,
+    pub rotation: f64,
 
     /// Whether the rotated visual overlay is mirrored horizontally across its center axis.
     #[serde(default)]
@@ -71,7 +71,7 @@ impl Default for OverlayState
             x: DEFAULT_POS_X,
             y: DEFAULT_POS_Y,
             scale: DEFAULT_SCALE,
-            rotation: Rotation::default(),
+            rotation: 0.0,
             flipped: false,
         }
     }
@@ -167,7 +167,10 @@ impl ConfigStore
             state.scale = scale;
         }
 
-        if let Some(rotation) = entry.get("rotation").and_then(extract_rotation)
+        if let Some(rotation) = entry
+            .get("rotation")
+            .and_then(extract_finite_number)
+            .map(normalized_angle_deg)
         {
             state.rotation = rotation;
         }
@@ -237,7 +240,7 @@ impl ConfigStore
             x = state.x,
             y = state.y,
             scale = state.scale,
-            rotation = state.rotation.degrees(),
+            rotation = state.rotation,
             flipped = state.flipped,
             "Saved overlay state"
         );
@@ -290,28 +293,27 @@ fn extract_finite_number(value: &Value) -> Option<f64>
     }
 }
 
-/// Validates that a JSON value represents an exact clockwise quarter-turn (`0`, `90`, `180`, `270`).
-fn extract_rotation(value: &Value) -> Option<Rotation>
-{
-    value.as_u64().and_then(Rotation::from_degrees)
-}
-
-/// Serializes `Rotation` as integer clockwise degrees (`0`, `90`, `180`, or `270`).
-fn serialize_rotation<S>(rotation: &Rotation, serializer: S) -> Result<S::Ok, S::Error>
+/// Serializes normalized clockwise degrees into `[0.0, 360.0)`.
+fn serialize_rotation<S>(rotation: &f64, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    serializer.serialize_u16(rotation.degrees())
+    serializer.serialize_f64(normalized_angle_deg(*rotation))
 }
 
-/// Deserializes integer clockwise degrees (`0`, `90`, `180`, or `270`) into `Rotation`.
-fn deserialize_rotation<'de, D>(deserializer: D) -> Result<Rotation, D::Error>
+/// Deserializes finite numeric degrees into canonical `[0.0, 360.0)`.
+fn deserialize_rotation<'de, D>(deserializer: D) -> Result<f64, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let degrees = u64::deserialize(deserializer)?;
-    Rotation::from_degrees(degrees)
-        .ok_or_else(|| serde::de::Error::custom("rotation must be 0, 90, 180, or 270 degrees"))
+    let degrees = f64::deserialize(deserializer)?;
+    if !degrees.is_finite()
+    {
+        return Err(serde::de::Error::custom(
+            "rotation must be a finite number of degrees",
+        ));
+    }
+    Ok(normalized_angle_deg(degrees))
 }
 
 /// Collapses `.` and `..` components without dereferencing filesystem symlinks.

@@ -13,7 +13,7 @@ use std::{
 
 use animated_image_widget::{
     decode::{
-        DecodedFirstFrame, EncodedFrame, FrameDecoder, FrameStreamSink,
+        DecodedFirstFrame, EncodedFrame, FrameDecoder, FrameStreamSink, rotate_argb8888_into,
         straight_rgba_to_premultiplied_argb8888,
     },
     error::CacheError,
@@ -587,4 +587,64 @@ fn decode_single_frame_sync_and_static_formats_work_via_single_open()
     assert!(webp_worker.is_none());
     assert!(webp_rec.lock().unwrap().finished);
     assert_eq!(webp_rec.lock().unwrap().frames.len(), 1);
+}
+
+#[test]
+fn rotate_argb8888_handles_chirality_and_transparent_apron_antialiasing()
+{
+    // 2x2 source pixels in [B, G, R, A]:
+    // (0,0)=[1,0,0,255], (1,0)=[2,0,0,255]
+    // (0,1)=[3,0,0,255], (1,1)=[4,0,0,255]
+    let grid: [u8; 16] = [
+        1, 0, 0, 255, 2, 0, 0, 255, // row 0
+        3, 0, 0, 255, 4, 0, 0, 255, // row 1
+    ];
+    let mut dst = Vec::new();
+
+    // 90 deg CW unflipped -> [3, 1; 4, 2]
+    let dims = rotate_argb8888_into(&grid, 2, 2, 90.0, false, &mut dst).unwrap();
+    assert_eq!(dims, (2, 2));
+    assert_eq!(
+        dst,
+        vec![
+            3, 0, 0, 255, 1, 0, 0, 255, // row 0
+            4, 0, 0, 255, 2, 0, 0, 255, // row 1
+        ]
+    );
+
+    // 90 deg CW flipped horizontally -> [1, 3; 2, 4]
+    rotate_argb8888_into(&grid, 2, 2, 90.0, true, &mut dst).unwrap();
+    assert_eq!(
+        dst,
+        vec![
+            1, 0, 0, 255, 3, 0, 0, 255, // row 0
+            2, 0, 0, 255, 4, 0, 0, 255, // row 1
+        ]
+    );
+
+    // 20x10 solid opaque colored block rotated 45 deg preserves center alpha=255 and valid premul edge alpha.
+    let block = [25, 100, 200, 255].repeat(20 * 10);
+    let (rot_w, rot_h) = rotate_argb8888_into(&block, 20, 10, 45.0, false, &mut dst).unwrap();
+    assert_eq!((rot_w, rot_h), (22, 22));
+    assert_eq!(dst.len(), 22 * 22 * 4);
+
+    // Exterior corner lies strictly outside source box.
+    assert_eq!(&dst[0..4], &[0, 0, 0, 0]);
+
+    // Center pixel remains solid opaque with exact source channels.
+    let mid_off = (11 * 22 + 11) * 4;
+    assert_eq!(&dst[mid_off..mid_off + 4], &[25, 100, 200, 255]);
+
+    // Partial apron alpha exists along boundaries and every output pixel stays premultiplied-valid.
+    let mut has_semitransparent = false;
+    for px in dst.as_chunks::<4>().0
+    {
+        let (b, g, r, a) = (px[0], px[1], px[2], px[3]);
+        assert!(b <= a && g <= a && r <= a, "invalid premul pixel {px:?}");
+        if a > 0 && a < 255
+        {
+            has_semitransparent = true;
+        }
+    }
+    assert!(has_semitransparent);
 }

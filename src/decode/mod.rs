@@ -11,7 +11,7 @@ pub mod stream;
 
 // Frame payload records, buffer validation, and premultiplied pixel conversion helpers.
 pub use pixel::{
-    BYTES_PER_PIXEL, DecodedFirstFrame, EncodedFrame, checked_argb_byte_len,
+    BYTES_PER_PIXEL, DecodedFirstFrame, EncodedFrame, checked_argb_byte_len, rotate_argb8888_into,
     straight_rgba_to_premultiplied_argb8888,
 };
 // Streaming decoder entry point and frame sink trait.

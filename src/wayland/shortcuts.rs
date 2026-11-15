@@ -3,8 +3,8 @@
 // Wayland keyboard symbol constants and scroll axis metrics from SCTK.
 use smithay_client_toolkit::seat::{keyboard::Keysym, pointer::AxisScroll};
 
-// Axis and rotation direction mapped from edit-mode `r`/`R` and `f`/`F` shortcuts.
-use crate::layout::{FlipAxis, RotateDirection};
+// Axis mapped from edit-mode `f`/`F` flip shortcuts.
+use crate::layout::FlipAxis;
 
 /// Maximum inter-click interval in milliseconds for consecutive triple-click taps.
 pub const TRIPLE_CLICK_WINDOW_MS: u32 = 400;
@@ -39,8 +39,18 @@ pub enum KeyShortcut
         steps: i8,
     },
 
-    /// Rotate overlay 90 degrees clockwise (`r`) or counter-clockwise (`R`).
-    Rotate(RotateDirection),
+    /// Rotate overlay visually clockwise or counter-clockwise (`r`/`R` +/-90, `]`/`[` +/-5).
+    Rotate
+    {
+        /// Signed clockwise rotation step in degrees (`90`, `-90`, `5`, `-5`).
+        delta_deg: i16,
+
+        /// Whether holding the key repeats the rotation step.
+        repeatable: bool,
+    },
+
+    /// Reset overlay rotation angle back to `0` degrees upright (`0`).
+    ResetRotation,
 
     /// Mirror overlay horizontally (`f`) or vertically (`F`).
     Flip(FlipAxis),
@@ -51,10 +61,18 @@ pub enum KeyShortcut
 
 impl KeyShortcut
 {
-    /// Returns `true` when holding the key should repeat the shortcut (`Move` / `Scale`).
+    /// Returns `true` when holding the key should repeat the shortcut (`Move` / `Scale` / fine `Rotate`).
     pub const fn is_repeatable(self) -> bool
     {
-        matches!(self, Self::Move { .. } | Self::Scale { .. })
+        matches!(
+            self,
+            Self::Move { .. }
+                | Self::Scale { .. }
+                | Self::Rotate {
+                    repeatable: true,
+                    ..
+                }
+        )
     }
 }
 
@@ -138,8 +156,23 @@ pub fn map_edit_keysym(keysym: Keysym) -> Option<KeyShortcut>
         {
             Some(KeyShortcut::Scale { steps: -1 })
         }
-        Keysym::r => Some(KeyShortcut::Rotate(RotateDirection::Clockwise)),
-        Keysym::R => Some(KeyShortcut::Rotate(RotateDirection::CounterClockwise)),
+        Keysym::r => Some(KeyShortcut::Rotate {
+            delta_deg: 90,
+            repeatable: false,
+        }),
+        Keysym::R => Some(KeyShortcut::Rotate {
+            delta_deg: -90,
+            repeatable: false,
+        }),
+        Keysym::bracketleft => Some(KeyShortcut::Rotate {
+            delta_deg: -5,
+            repeatable: true,
+        }),
+        Keysym::bracketright => Some(KeyShortcut::Rotate {
+            delta_deg: 5,
+            repeatable: true,
+        }),
+        Keysym::_0 => Some(KeyShortcut::ResetRotation),
         Keysym::f => Some(KeyShortcut::Flip(FlipAxis::Horizontal)),
         Keysym::F => Some(KeyShortcut::Flip(FlipAxis::Vertical)),
         Keysym::space => Some(KeyShortcut::TogglePause),

@@ -34,6 +34,8 @@ Edit mode keys:
   Arrows / hjkl                     Nudge overlay position
   + / -                             Zoom scale up or down
   r / R                             Rotate 90 degrees clockwise or counter-clockwise
+  [ / ]                             Rotate 5 degrees counter-clockwise or clockwise
+  0                                 Reset rotation to 0 degrees
   f / F                             Flip horizontally or vertically
   Space                             Pause or resume animation
   q                                 Quit overlay";

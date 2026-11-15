@@ -101,6 +101,12 @@ impl ImageBufferRing
         })
     }
 
+    /// Returns the pixel dimensions `(width, height)` allocated in this SHM buffer ring.
+    pub(crate) fn dimensions(&self) -> (u32, u32)
+    {
+        (self.frame_width as u32, self.frame_height as u32)
+    }
+
     /// Copies premultiplied `argb` pixels into a released slot and attaches it to `surface`.
     pub(crate) fn upload_and_attach(
         &mut self,

@@ -37,6 +37,7 @@ use super::{
     shm_ring::{ImageBufferRing, create_argb_buffer, shm_pool_err},
 };
 use crate::{
+    decode::rotate_argb8888_into,
     error::{OverlayError, WaylandError},
     layout::{OverlayLayout, Rotation},
 };
@@ -104,8 +105,11 @@ pub(crate) struct OverlayScene
     // Dedicated shared memory pool holding `parent_transparent_buf`.
     _parent_pool: SlotPool,
 
-    // Reusable frame ring backing `image_surface`.
+    // Reusable frame ring backing `image_surface` at source or rotated pixel bounds.
     frame_ring: ImageBufferRing,
+
+    // Reused scratch buffer holding CPU-resampled premultiplied `ARGB8888` pixels at fractional angles.
+    rotated_scratch: Vec<u8>,
 
     // Corner handle and edit-mode dashed border subsurfaces.
     chrome: OverlayChrome,
@@ -119,11 +123,8 @@ pub(crate) struct OverlayScene
     // Cached last committed edit mode to avoid redundant `set_keyboard_interactivity` commits.
     last_editing: bool,
 
-    // Cached last committed rotation applied to `image_surface`.
-    last_rotation: Rotation,
-
-    // Cached last committed horizontal flip state applied to `image_surface`.
-    last_flipped: bool,
+    // Cached last committed Wayland buffer transform applied to `image_surface`.
+    last_buffer_transform: Transform,
 
     // Cached last committed `wp_viewport` destination size on `image_surface`.
     last_image_dest: (i32, i32),
@@ -205,12 +206,12 @@ impl OverlayScene
             parent_transparent_buf,
             _parent_pool: parent_pool,
             frame_ring,
+            rotated_scratch: Vec::new(),
             chrome,
             screen_width: sw,
             screen_height: sh,
             last_editing: false,
-            last_rotation: Rotation::default(),
-            last_flipped: false,
+            last_buffer_transform: Transform::Normal,
             last_image_dest: (0, 0),
         })
     }
@@ -235,10 +236,8 @@ impl OverlayScene
         self.parent_layer.wl_surface().damage_buffer(0, 0, 1, 1);
         self.parent_viewport.set_destination(sw as i32, sh as i32);
 
-        self.frame_ring
-            .upload_and_attach(&self.image_surface, frame0_argb)?;
-
-        self.sync_layout(compositor, shm, layout, input)?;
+        let _retired_ring = self.stage_oriented_buffer(shm, layout, frame0_argb)?;
+        self.sync_layout_inner(compositor, shm, layout, input, true)?;
         Ok(())
     }
 
@@ -277,11 +276,71 @@ impl OverlayScene
 
     /// Uploads and attaches a new animation frame onto the desynchronized image subsurface.
     ///
-    /// Callers commit `image_surface` separately after queuing any `wl_surface::frame` callback.
-    pub(crate) fn stage_frame(&mut self, frame_argb: &[u8]) -> Result<(), OverlayError>
+    /// Returns any retired `ImageBufferRing` so callers keep the old SHM pool alive until after
+    /// committing `image_surface`.
+    pub(crate) fn stage_frame(
+        &mut self,
+        shm: &Shm,
+        layout: &OverlayLayout,
+        frame_argb: &[u8],
+    ) -> Result<Option<ImageBufferRing>, OverlayError>
     {
+        self.stage_oriented_buffer(shm, layout, frame_argb)
+    }
+
+    /// Re-uploads `frame_argb` for `layout` orientation and atomically commits buffer + layout changes.
+    pub(crate) fn refresh_oriented_frame(
+        &mut self,
+        compositor: &CompositorState,
+        shm: &Shm,
+        layout: &OverlayLayout,
+        input: &InputState,
+        frame_argb: &[u8],
+    ) -> Result<(), OverlayError>
+    {
+        let _retired_ring = self.stage_oriented_buffer(shm, layout, frame_argb)?;
+        self.sync_layout_inner(compositor, shm, layout, input, true)?;
+        Ok(())
+    }
+
+    /// Selects unrotated hardware-transform pixels or CPU-resampled scratch pixels, ensures the SHM
+    /// frame ring dimensions match, and attaches the buffer onto `self.image_surface`.
+    fn stage_oriented_buffer(
+        &mut self,
+        shm: &Shm,
+        layout: &OverlayLayout,
+        frame_argb: &[u8],
+    ) -> Result<Option<ImageBufferRing>, OverlayError>
+    {
+        let (frame_w, frame_h) = layout.frame_size();
+        let (target_w, target_h, pixels): (u32, u32, &[u8]) = if layout.quarter_turn().is_some()
+        {
+            (frame_w, frame_h, frame_argb)
+        }
+        else
+        {
+            let (rot_w, rot_h) = rotate_argb8888_into(
+                frame_argb,
+                frame_w,
+                frame_h,
+                layout.rotation(),
+                layout.flipped(),
+                &mut self.rotated_scratch,
+            )?;
+            (rot_w, rot_h, self.rotated_scratch.as_slice())
+        };
+
+        if self.frame_ring.dimensions() != (target_w, target_h)
+        {
+            let mut replacement = ImageBufferRing::new(shm, target_w, target_h)?;
+            replacement.upload_and_attach(&self.image_surface, pixels)?;
+            let retired = std::mem::replace(&mut self.frame_ring, replacement);
+            return Ok(Some(retired));
+        }
+
         self.frame_ring
-            .upload_and_attach(&self.image_surface, frame_argb)
+            .upload_and_attach(&self.image_surface, pixels)?;
+        Ok(None)
     }
 
     /// Updates image subsurface position/scale, handle visibility/hover, dashed border, and input region.
@@ -291,6 +350,20 @@ impl OverlayScene
         shm: &Shm,
         layout: &OverlayLayout,
         input: &InputState,
+    ) -> Result<(), OverlayError>
+    {
+        self.sync_layout_inner(compositor, shm, layout, input, false)
+    }
+
+    /// Applies layout updates onto parent and image subsurfaces, forcing `image_surface.commit()`
+    /// whenever a new buffer was staged immediately beforehand.
+    fn sync_layout_inner(
+        &mut self,
+        compositor: &CompositorState,
+        shm: &Shm,
+        layout: &OverlayLayout,
+        input: &InputState,
+        force_image_commit: bool,
     ) -> Result<(), OverlayError>
     {
         let (sw, sh) = layout.screen_size();
@@ -306,7 +379,7 @@ impl OverlayScene
 
         let dst_w = rect.width as i32;
         let dst_h = rect.height as i32;
-        let mut image_state_changed = false;
+        let mut image_state_changed = force_image_commit;
 
         if (dst_w, dst_h) != self.last_image_dest
         {
@@ -315,20 +388,21 @@ impl OverlayScene
             image_state_changed = true;
         }
 
-        let desired_rotation = layout.rotation();
-        let desired_flipped = layout.flipped();
-        if desired_rotation != self.last_rotation || desired_flipped != self.last_flipped
+        let desired_transform = match layout.quarter_turn()
         {
-            self.last_rotation = desired_rotation;
-            self.last_flipped = desired_flipped;
+            Some(quarter) => wl_transform_for_orientation(quarter, layout.flipped()),
+            None => Transform::Normal,
+        };
+        if desired_transform != self.last_buffer_transform
+        {
+            self.last_buffer_transform = desired_transform;
             if self.image_surface.version() >= 2
             {
-                let transform = wl_transform_for_orientation(desired_rotation, desired_flipped);
-                self.image_surface.set_buffer_transform(transform);
+                self.image_surface.set_buffer_transform(desired_transform);
                 tracing::debug!(
-                    ?desired_rotation,
-                    desired_flipped,
-                    ?transform,
+                    rotation_deg = layout.rotation(),
+                    flipped = layout.flipped(),
+                    ?desired_transform,
                     "Updated overlay buffer transform"
                 );
             }

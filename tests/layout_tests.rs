@@ -4,7 +4,7 @@ use animated_image_widget::{
     config::OverlayState,
     layout::{
         FlipAxis, HANDLE_SIZE, LogicalRect, MIN_OVERLAY_SIZE, OverlayLayout, RotateDirection,
-        Rotation, SCROLL_ZOOM_BASE,
+        Rotation, SCROLL_ZOOM_BASE, exact_quarter_turn, normalized_angle_deg, rotated_bounds,
     },
 };
 
@@ -20,7 +20,7 @@ fn layout_clamps_scale_and_coordinates_within_monitor()
             x: 5000.0,
             y: -20.0,
             scale: 10.0,
-            rotation: Rotation::Deg0,
+            rotation: 0.0,
             flipped: false,
         },
     );
@@ -49,7 +49,7 @@ fn layout_drag_move_and_resize_preserve_top_left_and_bounds()
             x: 100.0,
             y: 120.0,
             scale: 1.0,
-            rotation: Rotation::Deg0,
+            rotation: 0.0,
             flipped: false,
         },
     );
@@ -78,7 +78,7 @@ fn layout_scroll_zoom_matches_exponential_factor()
             x: 50.0,
             y: 50.0,
             scale: 0.5,
-            rotation: Rotation::Deg0,
+            rotation: 0.0,
             flipped: false,
         },
     );
@@ -100,7 +100,7 @@ fn layout_computes_passive_handle_and_edit_input_regions()
             x: 100.0,
             y: 200.0,
             scale: 1.0,
-            rotation: Rotation::Deg0,
+            rotation: 0.0,
             flipped: false,
         },
     );
@@ -130,32 +130,23 @@ fn layout_computes_passive_handle_and_edit_input_regions()
 }
 
 #[test]
-fn rotation_enum_cycles_full_turn_and_swaps_quarter_turn_axes()
+fn angle_normalization_quarter_turn_snapping_and_rotated_bounds()
 {
-    let mut rot = Rotation::Deg0;
-    rot = rot.rotated(RotateDirection::Clockwise);
-    assert_eq!(rot, Rotation::Deg90);
-    assert_eq!(rot.orient_dimensions(500, 700), (700, 500));
+    assert_eq!(normalized_angle_deg(-90.0), 270.0);
+    assert_eq!(normalized_angle_deg(360.0 - 5e-7), 0.0);
+    assert_eq!(normalized_angle_deg(90.0 + 5e-7), 90.0);
+    assert_eq!(normalized_angle_deg(f64::NAN), 0.0);
 
-    rot = rot.rotated(RotateDirection::Clockwise);
-    assert_eq!(rot, Rotation::Deg180);
-    assert_eq!(rot.orient_dimensions(500, 700), (500, 700));
+    assert_eq!(exact_quarter_turn(0.0), Some(Rotation::Deg0));
+    assert_eq!(exact_quarter_turn(90.0 - 5e-7), Some(Rotation::Deg90));
+    assert_eq!(exact_quarter_turn(180.0), Some(Rotation::Deg180));
+    assert_eq!(exact_quarter_turn(270.0), Some(Rotation::Deg270));
+    assert_eq!(exact_quarter_turn(45.0), None);
+    assert_eq!(exact_quarter_turn(90.001), None);
 
-    rot = rot.rotated(RotateDirection::Clockwise);
-    assert_eq!(rot, Rotation::Deg270);
-    assert_eq!(rot.orient_dimensions(500, 700), (700, 500));
-
-    rot = rot.rotated(RotateDirection::Clockwise);
-    assert_eq!(rot, Rotation::Deg0);
-
-    assert_eq!(
-        rot.rotated(RotateDirection::CounterClockwise),
-        Rotation::Deg270
-    );
-    assert_eq!(
-        Rotation::Deg90.rotated(RotateDirection::CounterClockwise),
-        Rotation::Deg0
-    );
+    assert_eq!(rotated_bounds(200, 100, 0.0), (200, 100));
+    assert_eq!(rotated_bounds(200, 100, 90.0), (100, 200));
+    assert_eq!(rotated_bounds(200, 100, 45.0), (213, 213));
 }
 
 #[test]
@@ -170,13 +161,14 @@ fn layout_rotate_swaps_bounds_preserves_center_and_uses_oriented_resize()
             x: 500.0,
             y: 400.0,
             scale: 1.0,
-            rotation: Rotation::Deg0,
+            rotation: 0.0,
             flipped: false,
         },
     );
 
     layout.rotate(RotateDirection::Clockwise);
-    assert_eq!(layout.rotation(), Rotation::Deg90);
+    assert_eq!(layout.rotation(), 90.0);
+    assert_eq!(layout.quarter_turn(), Some(Rotation::Deg90));
     assert_eq!(layout.oriented_frame_size(), (200, 400));
     assert_eq!(layout.overlay_size(), (200, 400));
     assert_eq!(layout.state().x, 600.0);
@@ -188,7 +180,8 @@ fn layout_rotate_swaps_bounds_preserves_center_and_uses_oriented_resize()
     assert_eq!(layout.overlay_size(), (300, 600));
 
     layout.rotate(RotateDirection::CounterClockwise);
-    assert_eq!(layout.rotation(), Rotation::Deg0);
+    assert_eq!(layout.rotation(), 0.0);
+    assert_eq!(layout.quarter_turn(), Some(Rotation::Deg0));
     assert_eq!(layout.overlay_size(), (600, 300));
 }
 
@@ -204,7 +197,7 @@ fn layout_rotate_clamps_wide_overlay_against_screen_height()
             x: 0.0,
             y: 100.0,
             scale: 1.0,
-            rotation: Rotation::Deg0,
+            rotation: 0.0,
             flipped: false,
         },
     );
@@ -229,14 +222,15 @@ fn layout_restores_saved_rotation_on_startup_and_clamps_bounds()
             x: 2000.0,
             y: 200.0,
             scale: 1.0,
-            rotation: Rotation::Deg270,
+            rotation: 270.0,
             flipped: false,
         },
     );
 
-    assert_eq!(layout.rotation(), Rotation::Deg270);
+    assert_eq!(layout.rotation(), 270.0);
+    assert_eq!(layout.quarter_turn(), Some(Rotation::Deg270));
     assert!(!layout.flipped());
-    assert_eq!(layout.state().rotation, Rotation::Deg270);
+    assert_eq!(layout.state().rotation, 270.0);
     assert_eq!(layout.oriented_frame_size(), (600, 1800));
     let expected_scale = 1080.0 / 1800.0;
     assert!((layout.state().scale - expected_scale).abs() < 1e-9);
@@ -265,10 +259,10 @@ fn layout_flip_and_rotate_match_screen_space_dihedral_group()
     {
         [g[1], g[0]]
     }
-    fn render(rotation: Rotation, flipped: bool) -> [[char; 2]; 2]
+    fn render(quarter: Option<Rotation>, flipped: bool) -> [[char; 2]; 2]
     {
         let mut grid = [['A', 'B'], ['C', 'D']];
-        let steps = match rotation
+        let steps = match quarter.expect("dihedral sequence should remain aligned to quarter turns")
         {
             Rotation::Deg0 => 0,
             Rotation::Deg90 => 1,
@@ -329,11 +323,69 @@ fn layout_flip_and_rotate_match_screen_space_dihedral_group()
                 };
             }
         }
-        assert_eq!(render(layout.rotation(), layout.flipped()), expected);
+        assert_eq!(render(layout.quarter_turn(), layout.flipped()), expected);
     }
 
     // Flipping keeps size and position untouched while preserving center under later rotation.
     let rect_before = layout.overlay_rect();
     layout.flip(FlipAxis::Horizontal);
     assert_eq!(layout.overlay_rect(), rect_before);
+}
+
+#[test]
+fn layout_arbitrary_angle_stepping_chirality_and_reset()
+{
+    let mut layout = OverlayLayout::new(
+        200,
+        100,
+        1920,
+        1080,
+        OverlayState {
+            x: 500.0,
+            y: 400.0,
+            scale: 1.0,
+            rotation: 0.0,
+            flipped: false,
+        },
+    );
+    let init_cx = layout.state().x + f64::from(layout.overlay_size().0) * 0.5;
+    let init_cy = layout.state().y + f64::from(layout.overlay_size().1) * 0.5;
+
+    for _ in 0..9
+    {
+        layout.rotate_by(5.0);
+    }
+    assert_eq!(layout.rotation(), 45.0);
+    assert_eq!(layout.quarter_turn(), None);
+    assert_eq!(layout.oriented_frame_size(), (213, 213));
+
+    for _ in 0..9
+    {
+        layout.rotate_by(5.0);
+    }
+    assert_eq!(layout.rotation(), 90.0);
+    assert_eq!(layout.quarter_turn(), Some(Rotation::Deg90));
+    assert_eq!(layout.oriented_frame_size(), (100, 200));
+
+    // Horizontally mirrored view subtracts positive CW delta to preserve visual CW direction.
+    layout.flip(FlipAxis::Horizontal);
+    layout.rotate_by(5.0);
+    assert_eq!(layout.rotation(), 85.0);
+    assert_eq!(layout.quarter_turn(), None);
+
+    // Vertically flipping adds 180 degrees modulo 360 and preserves flipped bounds.
+    let rect_before = layout.overlay_rect();
+    layout.flip(FlipAxis::Vertical);
+    assert!(!layout.flipped());
+    assert_eq!(layout.rotation(), 265.0);
+    assert_eq!(layout.overlay_rect(), rect_before);
+
+    layout.reset_rotation();
+    assert_eq!(layout.rotation(), 0.0);
+    assert_eq!(layout.quarter_turn(), Some(Rotation::Deg0));
+    assert_eq!(layout.oriented_frame_size(), (200, 100));
+    let end_cx = layout.state().x + f64::from(layout.overlay_size().0) * 0.5;
+    let end_cy = layout.state().y + f64::from(layout.overlay_size().1) * 0.5;
+    assert!((end_cx - init_cx).abs() <= 1.0);
+    assert!((end_cy - init_cy).abs() <= 1.0);
 }

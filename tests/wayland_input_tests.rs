@@ -3,7 +3,7 @@
 
 use animated_image_widget::{
     config::OverlayState,
-    layout::{FlipAxis, KEYBOARD_NUDGE_PX, OverlayLayout, RotateDirection, Rotation},
+    layout::{FlipAxis, KEYBOARD_NUDGE_PX, OverlayLayout, Rotation},
     wayland::{
         ClickTracker, InputState, KeyShortcut, MonitorDescriptor, PointerCursor,
         TRIPLE_CLICK_WINDOW_MS,
@@ -28,7 +28,7 @@ fn sample_layout() -> OverlayLayout
             x: 200.0,
             y: 150.0,
             scale: 1.0,
-            rotation: Rotation::Deg0,
+            rotation: 0.0,
             flipped: false,
         },
     )
@@ -228,11 +228,35 @@ fn keyboard_shortcuts_operate_only_in_edit_mode()
     );
     assert_eq!(
         map_edit_keysym(Keysym::r),
-        Some(KeyShortcut::Rotate(RotateDirection::Clockwise))
+        Some(KeyShortcut::Rotate {
+            delta_deg: 90,
+            repeatable: false
+        })
     );
     assert_eq!(
         map_edit_keysym(Keysym::R),
-        Some(KeyShortcut::Rotate(RotateDirection::CounterClockwise))
+        Some(KeyShortcut::Rotate {
+            delta_deg: -90,
+            repeatable: false
+        })
+    );
+    assert_eq!(
+        map_edit_keysym(Keysym::bracketleft),
+        Some(KeyShortcut::Rotate {
+            delta_deg: -5,
+            repeatable: true
+        })
+    );
+    assert_eq!(
+        map_edit_keysym(Keysym::bracketright),
+        Some(KeyShortcut::Rotate {
+            delta_deg: 5,
+            repeatable: true
+        })
+    );
+    assert_eq!(
+        map_edit_keysym(Keysym::_0),
+        Some(KeyShortcut::ResetRotation)
     );
     assert_eq!(
         map_edit_keysym(Keysym::f),
@@ -246,7 +270,7 @@ fn keyboard_shortcuts_operate_only_in_edit_mode()
 }
 
 #[test]
-fn rotate_shortcuts_work_only_in_edit_mode_and_ignore_repeats()
+fn rotate_shortcuts_work_only_in_edit_mode_and_manage_repeats_and_redraws()
 {
     let mut layout = sample_layout();
     let mut input = InputState::default();
@@ -254,25 +278,60 @@ fn rotate_shortcuts_work_only_in_edit_mode_and_ignore_repeats()
     // Ignored in passive playback.
     let passive = input.on_key_press(Keysym::r, &mut layout);
     assert!(!passive.layout_changed);
-    assert_eq!(layout.rotation(), Rotation::Deg0);
+    assert_eq!(layout.rotation(), 0.0);
 
     input.editing = true;
 
     let cw = input.on_key_press(Keysym::r, &mut layout);
     assert!(cw.layout_changed);
+    assert!(!cw.frame_redraw_needed);
     assert!(cw.schedule_save);
-    assert_eq!(layout.rotation(), Rotation::Deg90);
+    assert_eq!(layout.rotation(), 90.0);
+    assert_eq!(layout.quarter_turn(), Some(Rotation::Deg90));
     assert_eq!(layout.overlay_size(), (300, 400));
 
-    // Held r/R repeat events are ignored so orientation skips stay single-step.
+    // Held r/R repeat events are ignored so quarter-turn jumps stay single-step.
     assert!(!input.on_key_repeat(Keysym::r, &mut layout).layout_changed);
-    assert_eq!(layout.rotation(), Rotation::Deg90);
+    assert_eq!(layout.rotation(), 90.0);
 
     let ccw = input.on_key_press(Keysym::R, &mut layout);
     assert!(ccw.layout_changed);
+    assert!(!ccw.frame_redraw_needed);
     assert!(ccw.schedule_save);
-    assert_eq!(layout.rotation(), Rotation::Deg0);
+    assert_eq!(layout.rotation(), 0.0);
     assert_eq!(layout.overlay_size(), (400, 300));
+
+    // Fine rotation keys advance 5 degrees per press or repeat and request CPU redraws.
+    let fine = input.on_key_press(Keysym::bracketright, &mut layout);
+    assert!(fine.layout_changed);
+    assert!(fine.frame_redraw_needed);
+    assert!(fine.schedule_save);
+    assert_eq!(layout.rotation(), 5.0);
+
+    let fine_repeat = input.on_key_repeat(Keysym::bracketright, &mut layout);
+    assert!(fine_repeat.layout_changed);
+    assert!(fine_repeat.frame_redraw_needed);
+    assert_eq!(layout.rotation(), 10.0);
+
+    // Stepping back onto 0 degrees restores hardware buffer sizing cleanly.
+    let _ = input.on_key_press(Keysym::bracketleft, &mut layout);
+    let back_to_zero = input.on_key_repeat(Keysym::bracketleft, &mut layout);
+    assert!(back_to_zero.frame_redraw_needed);
+    assert_eq!(layout.rotation(), 0.0);
+    assert_eq!(layout.quarter_turn(), Some(Rotation::Deg0));
+
+    // Reset via '0' restores upright orientation while ignoring hold-repeat.
+    let _ = input.on_key_press(Keysym::bracketright, &mut layout);
+    assert!(!input.on_key_repeat(Keysym::_0, &mut layout).layout_changed);
+    let reset = input.on_key_press(Keysym::_0, &mut layout);
+    assert!(reset.layout_changed);
+    assert!(reset.frame_redraw_needed);
+    assert!(reset.schedule_save);
+    assert_eq!(layout.rotation(), 0.0);
+
+    // Repeating reset at 0 degrees avoids redundant CPU resampling.
+    let noop_reset = input.on_key_press(Keysym::_0, &mut layout);
+    assert!(!noop_reset.frame_redraw_needed);
 }
 
 #[test]
@@ -289,9 +348,10 @@ fn flip_shortcuts_work_only_in_edit_mode_and_ignore_repeats()
 
     let horiz = input.on_key_press(Keysym::f, &mut layout);
     assert!(horiz.layout_changed);
+    assert!(!horiz.frame_redraw_needed);
     assert!(horiz.schedule_save);
     assert!(layout.flipped());
-    assert_eq!(layout.rotation(), Rotation::Deg0);
+    assert_eq!(layout.rotation(), 0.0);
 
     // Held f/F repeat events are ignored so mirroring does not oscillate rapidly.
     assert!(!input.on_key_repeat(Keysym::f, &mut layout).layout_changed);
@@ -299,10 +359,17 @@ fn flip_shortcuts_work_only_in_edit_mode_and_ignore_repeats()
 
     let vert = input.on_key_press(Keysym::F, &mut layout);
     assert!(vert.layout_changed);
+    assert!(!vert.frame_redraw_needed);
     assert!(vert.schedule_save);
     assert!(!layout.flipped());
-    assert_eq!(layout.rotation(), Rotation::Deg180);
+    assert_eq!(layout.rotation(), 180.0);
     assert_eq!(layout.overlay_size(), (400, 300));
+
+    // Flipping at a fractional angle triggers CPU redraw instead of hardware transform.
+    let _ = input.on_key_press(Keysym::bracketright, &mut layout);
+    let frac_flip = input.on_key_press(Keysym::f, &mut layout);
+    assert!(frac_flip.frame_redraw_needed);
+    assert!(layout.flipped());
 }
 
 #[test]

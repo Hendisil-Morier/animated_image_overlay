@@ -8,8 +8,11 @@ use fast_image_resize::{PixelType, ResizeOptions, Resizer, images::Image as FirI
 // Fast LZ4 compression prepending uncompressed payload byte length.
 use lz4_flex::compress_prepend_size;
 
-// Cache subsystem error conversions.
-use crate::error::CacheError;
+// Cache subsystem error conversions and angle bounding-box geometry.
+use crate::{
+    error::CacheError,
+    layout::{normalized_angle_deg, rotated_bounds},
+};
 
 /// Pixel format multiplier (bytes per pixel for Wayland `ARGB8888` / `RGBA8888`).
 pub const BYTES_PER_PIXEL: usize = 4;
@@ -178,4 +181,134 @@ fn downscale_if_needed(
         })?;
 
     Ok(dst_img.into_vec())
+}
+
+// 40.24 fixed-point sampling resolution (24 fractional bits, 16-bit bilinear weights).
+const ROTATE_STEP_SHIFT: i32 = 24;
+const ROTATE_STEP_SCALE: f64 = (1_u64 << ROTATE_STEP_SHIFT) as f64;
+const ROTATE_WEIGHT_BITS: i32 = 16;
+const ROTATE_WEIGHT_SUBSHIFT: i32 = ROTATE_STEP_SHIFT - ROTATE_WEIGHT_BITS;
+const ROTATE_WEIGHT_ONE: u64 = 1_u64 << ROTATE_WEIGHT_BITS;
+const ROTATE_WEIGHT_MASK: i64 = (ROTATE_WEIGHT_ONE as i64) - 1;
+
+/// Fetches `[B, G, R, A]` as `u64` inside `[0, src_w) x [0, src_h)`, or transparent black in the apron.
+#[inline]
+fn sample_apron_pixel(src: &[u8], src_w: i64, src_h: i64, x: i64, y: i64)
+-> [u64; BYTES_PER_PIXEL]
+{
+    if x < 0 || x >= src_w || y < 0 || y >= src_h
+    {
+        return [0; BYTES_PER_PIXEL];
+    }
+
+    let offset = ((y * src_w + x) as usize) * BYTES_PER_PIXEL;
+    [
+        u64::from(src[offset]),
+        u64::from(src[offset + 1]),
+        u64::from(src[offset + 2]),
+        u64::from(src[offset + 3]),
+    ]
+}
+
+/// Bilinearly resamples premultiplied `ARGB8888` frame `src` (`src_w x src_h`) into `dst` rotated
+/// visually clockwise by `angle_deg` and horizontally mirrored when `flipped`.
+///
+/// Resizes `dst` to match the output bounding box (`rotated_bounds(src_w, src_h, angle_deg)`) and
+/// uses a `1 px` transparent apron outside source bounds so edges anti-alias cleanly.
+pub fn rotate_argb8888_into(
+    src: &[u8],
+    src_w: u32,
+    src_h: u32,
+    angle_deg: f64,
+    flipped: bool,
+    dst: &mut Vec<u8>,
+) -> Result<(u32, u32), CacheError>
+{
+    let expected_src_len = checked_argb_byte_len(src_w, src_h)?;
+    if src_w == 0 || src_h == 0 || src.len() != expected_src_len
+    {
+        return Err(CacheError::Decode {
+            path: PathBuf::from("<memory>"),
+            reason: format!(
+                "invalid source dimensions {}x{} for {} bytes",
+                src_w,
+                src_h,
+                src.len()
+            ),
+        });
+    }
+
+    let (dst_w, dst_h) = rotated_bounds(src_w, src_h, angle_deg);
+    let expected_dst_len = checked_argb_byte_len(dst_w, dst_h)?;
+    dst.resize(expected_dst_len, 0);
+
+    let radians = normalized_angle_deg(angle_deg).to_radians();
+    let cos_a = radians.cos();
+    let sin_a = radians.sin();
+    let flip_sign = if flipped { -1.0 } else { 1.0 };
+
+    let src_cx = (f64::from(src_w) - 1.0) * 0.5;
+    let src_cy = (f64::from(src_h) - 1.0) * 0.5;
+    let dst_cx = (f64::from(dst_w) - 1.0) * 0.5;
+    let dst_cy = (f64::from(dst_h) - 1.0) * 0.5;
+
+    // Horizontal incremental step along output X in fixed-point source coordinates.
+    let step_x_du = (flip_sign * cos_a * ROTATE_STEP_SCALE).round() as i64;
+    let step_x_dv = (-flip_sign * sin_a * ROTATE_STEP_SCALE).round() as i64;
+
+    let src_wi = i64::from(src_w);
+    let src_hi = i64::from(src_h);
+    let dst_stride = (dst_w as usize) * BYTES_PER_PIXEL;
+
+    for (oy, row) in dst.chunks_exact_mut(dst_stride).enumerate()
+    {
+        let dy = oy as f64 - dst_cy;
+        let row_sx0 = src_cx + (-dst_cx * flip_sign) * cos_a + dy * sin_a;
+        let row_sy0 = src_cy - (-dst_cx * flip_sign) * sin_a + dy * cos_a;
+        let mut sx_fp = (row_sx0 * ROTATE_STEP_SCALE).round() as i64;
+        let mut sy_fp = (row_sy0 * ROTATE_STEP_SCALE).round() as i64;
+
+        for out_px in row.as_chunks_mut::<BYTES_PER_PIXEL>().0
+        {
+            let x0 = sx_fp >> ROTATE_STEP_SHIFT;
+            let y0 = sy_fp >> ROTATE_STEP_SHIFT;
+
+            if x0 >= -1 && x0 < src_wi && y0 >= -1 && y0 < src_hi
+            {
+                let fx = ((sx_fp >> ROTATE_WEIGHT_SUBSHIFT) & ROTATE_WEIGHT_MASK) as u64;
+                let fy = ((sy_fp >> ROTATE_WEIGHT_SUBSHIFT) & ROTATE_WEIGHT_MASK) as u64;
+                let inv_x = ROTATE_WEIGHT_ONE - fx;
+                let inv_y = ROTATE_WEIGHT_ONE - fy;
+
+                let w00 = inv_x * inv_y;
+                let w10 = fx * inv_y;
+                let w01 = inv_x * fy;
+                let w11 = fx * fy;
+
+                let p00 = sample_apron_pixel(src, src_wi, src_hi, x0, y0);
+                let p10 = sample_apron_pixel(src, src_wi, src_hi, x0 + 1, y0);
+                let p01 = sample_apron_pixel(src, src_wi, src_hi, x0, y0 + 1);
+                let p11 = sample_apron_pixel(src, src_wi, src_hi, x0 + 1, y0 + 1);
+
+                for ch in 0..BYTES_PER_PIXEL
+                {
+                    let sum = w00 * p00[ch]
+                        + w10 * p10[ch]
+                        + w01 * p01[ch]
+                        + w11 * p11[ch]
+                        + (1_u64 << 31);
+                    out_px[ch] = (sum >> 32) as u8;
+                }
+            }
+            else
+            {
+                *out_px = [0; BYTES_PER_PIXEL];
+            }
+
+            sx_fp += step_x_du;
+            sy_fp += step_x_dv;
+        }
+    }
+
+    Ok((dst_w, dst_h))
 }

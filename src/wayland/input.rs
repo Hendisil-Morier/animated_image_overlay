@@ -75,6 +75,9 @@ pub struct InputEffects
     /// Overlay position, scale, or input region changed and must be re-applied to surfaces.
     pub layout_changed: bool,
 
+    /// Orientation changed into, within, or out of a fractional angle requiring CPU frame re-upload.
+    pub frame_redraw_needed: bool,
+
     /// Edit mode transitioned (`Some(true)` entered, `Some(false)` exited).
     pub edit_mode_changed: Option<bool>,
 
@@ -414,16 +417,29 @@ impl InputState
                 effects.layout_changed = true;
                 effects.schedule_save = true;
             }
-            KeyShortcut::Rotate(direction) =>
+            KeyShortcut::Rotate { delta_deg, .. } =>
             {
-                layout.rotate(direction);
+                let prev_quarter = layout.quarter_turn();
+                layout.rotate_by(f64::from(delta_deg));
                 effects.layout_changed = true;
+                effects.frame_redraw_needed =
+                    prev_quarter.is_none() || layout.quarter_turn().is_none();
+                effects.schedule_save = true;
+            }
+            KeyShortcut::ResetRotation =>
+            {
+                let prev_quarter = layout.quarter_turn();
+                layout.reset_rotation();
+                effects.layout_changed = true;
+                effects.frame_redraw_needed =
+                    prev_quarter.is_none() || layout.quarter_turn().is_none();
                 effects.schedule_save = true;
             }
             KeyShortcut::Flip(axis) =>
             {
                 layout.flip(axis);
                 effects.layout_changed = true;
+                effects.frame_redraw_needed = layout.quarter_turn().is_none();
                 effects.schedule_save = true;
             }
             KeyShortcut::TogglePause =>
