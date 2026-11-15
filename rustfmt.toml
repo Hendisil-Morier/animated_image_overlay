@@ -1,0 +1,6 @@
+# Formatting configuration for nightly rustfmt enforcing Allman braces per docs/CODING_STYLE.md.
+brace_style = "AlwaysNextLine"
+control_brace_style = "AlwaysNextLine"
+reorder_imports = true
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
