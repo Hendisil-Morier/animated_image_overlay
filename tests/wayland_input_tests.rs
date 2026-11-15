@@ -5,8 +5,8 @@ use animated_image_widget::{
     config::OverlayState,
     layout::{KEYBOARD_NUDGE_PX, OverlayLayout},
     wayland::{
-        ClickTracker, InputState, KeyShortcut, MonitorDescriptor, TRIPLE_CLICK_WINDOW_MS,
-        map_edit_keysym, resolve_monitor_index,
+        ClickTracker, InputState, KeyShortcut, MonitorDescriptor, PointerCursor,
+        TRIPLE_CLICK_WINDOW_MS, map_edit_keysym, resolve_monitor_index,
     },
 };
 use smithay_client_toolkit::seat::{
@@ -259,4 +259,57 @@ fn resolve_monitor_index_matches_index_and_connector_or_explains_failure()
 
     let err_empty = resolve_monitor_index(&[], "0").unwrap_err().to_string();
     assert!(err_empty.contains("no monitors found"));
+}
+
+#[test]
+fn passive_handle_drag_moves_overlay_and_updates_cursor_and_input_region()
+{
+    let mut layout = sample_layout();
+    let mut input = InputState::default();
+    assert!(!input.editing);
+
+    // Passive input region restricts hit-testing to the bottom-right 28x28 corner handle.
+    let handle_rect = layout.input_rect(false);
+    assert_eq!(handle_rect.width, 28);
+    assert_eq!(handle_rect.height, 28);
+
+    // Points outside the passive handle keep the default cursor and lie outside `input_rect(false)`.
+    let outside = (250.0, 200.0);
+    assert!(!layout.handle_contains(outside.0, outside.1));
+    assert_eq!(
+        input.desired_cursor(outside, &layout),
+        PointerCursor::Default
+    );
+
+    // Hovering and dragging inside the passive handle moves overlay + input region.
+    let handle_center = (
+        f64::from(handle_rect.x) + f64::from(handle_rect.width) / 2.0,
+        f64::from(handle_rect.y) + f64::from(handle_rect.height) / 2.0,
+    );
+    let _enter = input.on_pointer_enter();
+    assert_eq!(
+        input.desired_cursor(handle_center, &layout),
+        PointerCursor::Grab
+    );
+
+    let press = input.on_button_press(BTN_LEFT, 1000, handle_center, &layout);
+    assert!(press.cancel_fade_timer);
+    assert_eq!(
+        input.desired_cursor(handle_center, &layout),
+        PointerCursor::Grabbing
+    );
+
+    let target = (handle_center.0 + 45.0, handle_center.1 - 30.0);
+    let moved = input.on_pointer_motion(target, &mut layout);
+    assert!(moved.layout_changed);
+    assert_eq!(layout.state().x, 245.0);
+    assert_eq!(layout.state().y, 120.0);
+
+    let shifted_handle = layout.input_rect(false);
+    assert_eq!(shifted_handle.x, handle_rect.x + 45);
+    assert_eq!(shifted_handle.y, handle_rect.y - 30);
+
+    let released = input.on_button_release(BTN_LEFT);
+    assert!(released.schedule_save);
+    assert_eq!(input.desired_cursor(target, &layout), PointerCursor::Grab);
 }

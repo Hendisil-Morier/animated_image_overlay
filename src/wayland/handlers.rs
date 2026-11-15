@@ -206,25 +206,42 @@ impl SeatHandler for OverlayRuntime
         capability: Capability,
     )
     {
-        if capability == Capability::Pointer
-            && self.themed_pointer.is_none()
-            && let Some(cursor_surface) = self.cursor_surface.clone()
-            && let Ok(themed) = self.seat_state.get_pointer_with_theme::<Self, ()>(
+        if capability == Capability::Pointer && self.themed_pointer.is_none()
+        {
+            match self.seat_state.get_pointer_with_theme::<Self, ()>(
                 qh,
                 &seat,
                 self.shm.wl_shm(),
-                cursor_surface,
+                self.cursor_surface.clone(),
                 ThemeSpec::System,
             )
-        {
-            self.themed_pointer = Some(themed);
+            {
+                Ok(themed) =>
+                {
+                    tracing::debug!("Bound Wayland pointer with system cursor theme");
+                    self.themed_pointer = Some(themed);
+                }
+                Err(err) =>
+                {
+                    tracing::warn!(error = %err, "Failed binding Wayland themed pointer");
+                }
+            }
         }
 
-        if capability == Capability::Keyboard
-            && self.keyboard.is_none()
-            && let Ok(kbd) = self.seat_state.get_keyboard(qh, &seat, None)
+        if capability == Capability::Keyboard && self.keyboard.is_none()
         {
-            self.keyboard = Some(kbd);
+            match self.seat_state.get_keyboard(qh, &seat, None)
+            {
+                Ok(kbd) =>
+                {
+                    tracing::debug!("Bound Wayland keyboard on seat");
+                    self.keyboard = Some(kbd);
+                }
+                Err(err) =>
+                {
+                    tracing::warn!(error = %err, "Failed binding Wayland keyboard");
+                }
+            }
         }
     }
 
@@ -237,14 +254,18 @@ impl SeatHandler for OverlayRuntime
     )
     {
         if capability == Capability::Pointer
+            && let Some(themed) = self.themed_pointer.take()
         {
-            self.themed_pointer = None;
+            self.last_cursor = None;
+            themed.pointer().release();
+            tracing::debug!("Released Wayland pointer after capability removal");
         }
 
         if capability == Capability::Keyboard
             && let Some(kbd) = self.keyboard.take()
         {
             kbd.release();
+            tracing::debug!("Released Wayland keyboard after capability removal");
         }
     }
 
@@ -265,17 +286,55 @@ impl PointerHandler for OverlayRuntime
         {
             let effects = match event.kind
             {
-                PointerEventKind::Enter { .. } => self.input.on_pointer_enter(),
-                PointerEventKind::Leave { .. } => self.input.on_pointer_leave(),
+                PointerEventKind::Enter { .. } =>
+                {
+                    tracing::debug!(
+                        x = event.position.0,
+                        y = event.position.1,
+                        editing = self.input.editing,
+                        overlay = ?self.layout.overlay_rect(),
+                        input = ?self.layout.input_rect(self.input.editing),
+                        "Pointer entered overlay surface"
+                    );
+                    self.input.on_pointer_enter()
+                }
+                PointerEventKind::Leave { .. } =>
+                {
+                    self.last_cursor = None;
+                    tracing::debug!(
+                        x = event.position.0,
+                        y = event.position.1,
+                        "Pointer left overlay surface"
+                    );
+                    self.input.on_pointer_leave()
+                }
                 PointerEventKind::Motion { .. } => self
                     .input
                     .on_pointer_motion(event.position, &mut self.layout),
                 PointerEventKind::Press { time, button, .. } =>
                 {
+                    tracing::debug!(
+                        button,
+                        x = event.position.0,
+                        y = event.position.1,
+                        editing = self.input.editing,
+                        overlay = ?self.layout.overlay_rect(),
+                        "Pointer button pressed"
+                    );
                     self.input
                         .on_button_press(button, time, event.position, &self.layout)
                 }
-                PointerEventKind::Release { button, .. } => self.input.on_button_release(button),
+                PointerEventKind::Release { button, .. } =>
+                {
+                    tracing::debug!(
+                        button,
+                        x = event.position.0,
+                        y = event.position.1,
+                        overlay = ?self.layout.overlay_rect(),
+                        "Pointer button released"
+                    );
+                    self.input.on_button_release(button)
+                }
                 PointerEventKind::Axis { vertical, .. } =>
                 {
                     self.input.on_scroll(vertical, &mut self.layout)

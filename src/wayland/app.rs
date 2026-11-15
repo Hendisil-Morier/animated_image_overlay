@@ -91,6 +91,9 @@ pub fn run_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayE
     })?;
     let loop_handle = event_loop.handle();
 
+    // Create the cursor surface before `roundtrip` so `Capability::Pointer` binds immediately.
+    let cursor_surface = compositor.create_surface(&qh);
+
     let mut runtime = OverlayRuntime {
         conn: conn.clone(),
         qh: qh.clone(),
@@ -100,8 +103,9 @@ pub fn run_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayE
         output_state: OutputState::new(&globals, &qh),
         seat_state: SeatState::new(&globals, &qh),
         shm,
-        cursor_surface: None,
+        cursor_surface,
         themed_pointer: None,
+        last_cursor: None,
         keyboard: None,
         config_store,
         config_key,
@@ -150,7 +154,6 @@ pub fn run_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayE
     runtime
         .layout
         .set_screen_size(target_desc.width as u32, target_desc.height as u32);
-    runtime.cursor_surface = Some(runtime.compositor.create_surface(&qh));
 
     let scene = OverlayScene::create(
         &qh,

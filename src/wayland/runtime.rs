@@ -61,11 +61,14 @@ pub(crate) struct OverlayRuntime
     // Wayland shared-memory global for frame rings and cursor themes.
     pub(crate) shm: Shm,
 
-    // Cursor image surface bound to `ThemedPointer`.
-    pub(crate) cursor_surface: Option<WlSurface>,
+    // Cursor image surface bound to `ThemedPointer`, created eagerly before seat roundtrips.
+    pub(crate) cursor_surface: WlSurface,
 
     // System cursor theme pointer handle when pointer capability is advertised.
     pub(crate) themed_pointer: Option<ThemedPointer<()>>,
+
+    // Last cursor shape sent to the active pointer serial, cleared on pointer leave.
+    pub(crate) last_cursor: Option<PointerCursor>,
 
     // Active Wayland keyboard object while seat capability is present.
     pub(crate) keyboard: Option<WlKeyboard>,
@@ -266,22 +269,31 @@ impl OverlayRuntime
         }
     }
 
-    /// Updates cursor shape on the active pointer device to match drag/hover state.
-    pub(crate) fn update_pointer_cursor(&self, pos: (f64, f64))
+    /// Updates cursor shape on the active pointer device when it changes or upon re-entering.
+    pub(crate) fn update_pointer_cursor(&mut self, pos: (f64, f64))
     {
+        let desired = self.input.desired_cursor(pos, &self.layout);
+        if self.last_cursor == Some(desired)
+        {
+            return;
+        }
         let Some(themed) = &self.themed_pointer
         else
         {
             return;
         };
-        let icon = match self.input.desired_cursor(pos, &self.layout)
+        let icon = match desired
         {
             PointerCursor::Default => CursorIcon::Default,
             PointerCursor::Grab => CursorIcon::Grab,
             PointerCursor::Grabbing => CursorIcon::Grabbing,
             PointerCursor::ResizeBottomRight => CursorIcon::NwseResize,
         };
-        let _ = themed.set_cursor(&self.conn, icon);
+        match themed.set_cursor(&self.conn, icon)
+        {
+            Ok(()) => self.last_cursor = Some(desired),
+            Err(err) => tracing::warn!(error = %err, ?icon, "Failed updating pointer cursor"),
+        }
     }
 
     /// Flushes unsaved geometry, aborts background decoders cleanly, and removes active timers.
