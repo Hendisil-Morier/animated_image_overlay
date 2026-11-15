@@ -31,8 +31,14 @@ use super::{
     scene::OverlayScene,
 };
 use crate::{
-    cache::FrameCache, config::ConfigStore, layout::OverlayLayout, playback::PlaybackClock,
+    cache::FrameCache,
+    config::ConfigStore,
+    layout::OverlayLayout,
+    playback::{PlaybackClock, TickOutcome},
 };
+
+// Recovery delay in milliseconds after a cache read or SHM frame upload error.
+const FRAME_ERROR_RETRY_MS: u64 = 100;
 
 /// Active Wayland protocol state, timers, and overlay lifecycle coordinator.
 pub(crate) struct OverlayRuntime
@@ -106,6 +112,9 @@ pub(crate) struct OverlayRuntime
     // Tracks unpersisted coordinate or scale edits queued for debounced disk write.
     pub(crate) dirty_save: bool,
 
+    // Active `calloop` animation timer waiting for the next frame deadline or recovery retry.
+    pub(crate) frame_timer_token: Option<RegistrationToken>,
+
     // Active `500 ms` debounced config save timer registration.
     pub(crate) save_timer_token: Option<RegistrationToken>,
 
@@ -118,8 +127,8 @@ pub(crate) struct OverlayRuntime
 
 impl OverlayRuntime
 {
-    /// Queues a compositor frame callback on `image_surface` and optionally commits immediately.
-    pub(crate) fn queue_image_frame_callback(&mut self, commit_now: bool)
+    /// Requests a Wayland frame callback on `image_surface` and commits immediately.
+    pub(crate) fn queue_image_frame_callback(&mut self)
     {
         if let Some(scene) = &self.scene
         {
@@ -127,28 +136,87 @@ impl OverlayRuntime
             scene
                 .image_surface
                 .frame(&self.qh, FrameCallbackData(scene.image_surface.clone()));
-            if commit_now
-            {
-                scene.image_surface.commit();
-            }
+            scene.image_surface.commit();
         }
     }
 
-    /// Requests a Wayland frame callback on `image_surface` when animation or streaming needs ticks.
-    pub(crate) fn ensure_frame_callback_if_needed(&mut self)
+    /// Starts or resumes timer-paced animation ticks when configured and unpaused.
+    pub(crate) fn schedule_playback_if_needed(&mut self)
     {
         if !self.configured || self.frame_callback_pending || self.playback.is_paused()
         {
             return;
         }
 
-        let (delays, decode_done) = self.cache.delays_snapshot();
-        if delays.len() <= 1 && decode_done
+        self.tick_playback();
+    }
+
+    /// Advances playback with borrowed cache delays and presents or arms the next wait timer.
+    pub(crate) fn tick_playback(&mut self)
+    {
+        self.cancel_frame_timer();
+        if !self.configured || self.frame_callback_pending
         {
             return;
         }
 
-        self.queue_image_frame_callback(true);
+        let now_ms = self.start_instant.elapsed().as_secs_f64() * 1000.0;
+        let (outcome, wait_ms) = self.cache.with_delays(|delays, decode_done| {
+            let outcome = self.playback.advance(now_ms, delays, decode_done);
+            let wait_ms = if matches!(outcome, TickOutcome::NoChange)
+            {
+                self.playback.ms_until_next_frame(now_ms)
+            }
+            else
+            {
+                None
+            };
+            (outcome, wait_ms)
+        });
+
+        match outcome
+        {
+            TickOutcome::StopCallbacks =>
+            {}
+            TickOutcome::FrameChanged(idx) => self.present_frame_at(idx),
+            TickOutcome::NoChange =>
+            {
+                if let Some(delay_ms) = wait_ms
+                {
+                    self.schedule_frame_timer(delay_ms.max(1));
+                }
+            }
+        }
+    }
+
+    /// Fetches frame `idx` outside cache locks, uploads it to SHM, and requests a frame callback.
+    fn present_frame_at(&mut self, idx: usize)
+    {
+        let argb = match self.cache.frame_argb(idx)
+        {
+            Ok(argb) => argb,
+            Err(err) =>
+            {
+                tracing::warn!(error = %err, frame_index = idx, "Failed loading frame ARGB");
+                self.schedule_frame_timer(FRAME_ERROR_RETRY_MS);
+                return;
+            }
+        };
+
+        let Some(scene) = &mut self.scene
+        else
+        {
+            return;
+        };
+
+        if let Err(err) = scene.stage_frame(&argb)
+        {
+            tracing::warn!(error = %err, frame_index = idx, "Failed presenting frame");
+            self.schedule_frame_timer(FRAME_ERROR_RETRY_MS);
+            return;
+        }
+
+        self.queue_image_frame_callback();
     }
 
     /// Cancels or schedules the `500 ms` debounced config save and `2000 ms` handle fade timer.
@@ -200,27 +268,43 @@ impl OverlayRuntime
         {
             let paused = self.playback.toggle_pause();
             tracing::debug!(paused, "Toggled playback pause");
-            if !paused
+            if paused
             {
-                self.ensure_frame_callback_if_needed();
+                self.cancel_frame_timer();
+            }
+            else
+            {
+                self.schedule_playback_if_needed();
             }
         }
+    }
+
+    /// Arms or replaces the one-shot animation frame timer for `delay_ms` milliseconds.
+    pub(crate) fn schedule_frame_timer(&mut self, delay_ms: u64)
+    {
+        arm_timer(
+            &self.loop_handle,
+            &mut self.frame_timer_token,
+            delay_ms,
+            Self::on_frame_timer,
+        );
+    }
+
+    /// Cancels an active animation wait or recovery timer if armed.
+    pub(crate) fn cancel_frame_timer(&mut self)
+    {
+        clear_timer(&self.loop_handle, &mut self.frame_timer_token);
     }
 
     /// Arms or resets the 2-second idle timer hiding the corner handle visual cue.
     pub(crate) fn schedule_fade_timer(&mut self)
     {
-        self.cancel_fade_timer();
-        let timer = Timer::from_duration(Duration::from_millis(HANDLE_FADE_MS));
-        if let Ok(token) = self.loop_handle.insert_source(timer, |_, _, state| {
-            state.fade_timer_token = None;
-            let effects = state.input.on_fade_timeout();
-            state.apply_input_effects(effects);
-            TimeoutAction::Drop
-        })
-        {
-            self.fade_timer_token = Some(token);
-        }
+        arm_timer(
+            &self.loop_handle,
+            &mut self.fade_timer_token,
+            HANDLE_FADE_MS,
+            Self::on_fade_timer,
+        );
     }
 
     /// Cancels an active corner-handle fade timer if armed.
@@ -238,17 +322,34 @@ impl OverlayRuntime
     /// Arms or resets the 500 ms debounce timer before persisting overlay coordinates and scale.
     pub(crate) fn schedule_save_timer(&mut self)
     {
-        self.cancel_save_timer();
+        arm_timer(
+            &self.loop_handle,
+            &mut self.save_timer_token,
+            SAVE_DEBOUNCE_MS,
+            Self::on_save_timer,
+        );
+    }
 
-        let timer = Timer::from_duration(Duration::from_millis(SAVE_DEBOUNCE_MS));
-        if let Ok(token) = self.loop_handle.insert_source(timer, |_, _, state| {
-            state.save_timer_token = None;
-            state.flush_pending_save();
-            TimeoutAction::Drop
-        })
-        {
-            self.save_timer_token = Some(token);
-        }
+    /// Advances animation playback once the scheduled wait or error-recovery timer fires.
+    fn on_frame_timer(&mut self)
+    {
+        self.frame_timer_token = None;
+        self.tick_playback();
+    }
+
+    /// Hides the corner handle when its 2-second idle timer expires while unhovered.
+    fn on_fade_timer(&mut self)
+    {
+        self.fade_timer_token = None;
+        let effects = self.input.on_fade_timeout();
+        self.apply_input_effects(effects);
+    }
+
+    /// Flushes dirty geometry edits once the 500 ms debounce timer expires.
+    fn on_save_timer(&mut self)
+    {
+        self.save_timer_token = None;
+        self.flush_pending_save();
     }
 
     /// Writes pending state edits to `~/.config/apng-overlay.json` under exclusive `flock`.
@@ -299,11 +400,31 @@ impl OverlayRuntime
     /// Flushes unsaved geometry, aborts background decoders cleanly, and removes active timers.
     pub(crate) fn shutdown_cleanup(&mut self)
     {
+        self.cancel_frame_timer();
         self.cancel_fade_timer();
         self.cancel_save_timer();
         self.flush_pending_save();
         self.cache.stop();
         tracing::info!("Wayland overlay shutdown cleanup complete");
+    }
+}
+
+/// Replaces any timer registered under `slot` with a one-shot timeout calling `on_fire`.
+fn arm_timer(
+    loop_handle: &LoopHandle<'static, OverlayRuntime>,
+    slot: &mut Option<RegistrationToken>,
+    delay_ms: u64,
+    on_fire: fn(&mut OverlayRuntime),
+)
+{
+    clear_timer(loop_handle, slot);
+    let timer = Timer::from_duration(Duration::from_millis(delay_ms));
+    if let Ok(token) = loop_handle.insert_source(timer, move |_, _, state| {
+        on_fire(state);
+        TimeoutAction::Drop
+    })
+    {
+        *slot = Some(token);
     }
 }
 

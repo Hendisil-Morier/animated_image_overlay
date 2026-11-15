@@ -158,4 +158,22 @@ impl PlaybackClock
     {
         self.next_deadline_ms
     }
+
+    /// Returns whole milliseconds remaining until the next frame transition, if scheduled and unpaused.
+    pub fn ms_until_next_frame(&self, now_ms: f64) -> Option<u64>
+    {
+        if self.paused
+        {
+            return None;
+        }
+
+        let deadline = self.next_deadline_ms?;
+        let remaining = deadline - now_ms;
+        if !remaining.is_finite() || remaining <= 0.0
+        {
+            return Some(0);
+        }
+
+        Some(remaining.ceil().clamp(0.0, f64::from(u32::MAX)) as u64)
+    }
 }

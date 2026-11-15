@@ -29,9 +29,8 @@ use wayland_protocols::wp::viewporter::client::{
     wp_viewporter::{Event as ViewporterEvent, WpViewporter},
 };
 
-// Runtime state coordinator, pointer/keyboard effect flags, and frame playback outcomes.
+// Runtime state coordinator and pointer/keyboard effect flags.
 use super::{input::InputEffects, runtime::OverlayRuntime};
-use crate::playback::TickOutcome;
 
 impl ProvidesRegistryState for OverlayRuntime
 {
@@ -93,34 +92,7 @@ impl CompositorHandler for OverlayRuntime
         }
 
         self.frame_callback_pending = false;
-        let now_ms = self.start_instant.elapsed().as_secs_f64() * 1000.0;
-        let (delays, decode_done) = self.cache.delays_snapshot();
-
-        match self.playback.advance(now_ms, &delays, decode_done)
-        {
-            TickOutcome::StopCallbacks =>
-            {}
-            TickOutcome::FrameChanged(idx) => match self.cache.frame_argb(idx)
-            {
-                Ok(argb) =>
-                {
-                    self.queue_image_frame_callback(false);
-                    if let Some(scene) = &mut self.scene
-                        && let Err(err) = scene.present_frame(&argb)
-                    {
-                        tracing::warn!(error = %err, frame_index = idx, "Failed presenting frame");
-                    }
-                }
-                Err(err) =>
-                {
-                    tracing::warn!(error = %err, frame_index = idx, "Failed loading frame ARGB");
-                }
-            },
-            TickOutcome::NoChange =>
-            {
-                self.queue_image_frame_callback(true);
-            }
-        }
+        self.tick_playback();
     }
 
     fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlSurface, _: &WlOutput)
@@ -180,7 +152,7 @@ impl LayerShellHandler for OverlayRuntime
                 ..InputEffects::default()
             };
             self.apply_input_effects(initial_timer);
-            self.ensure_frame_callback_if_needed();
+            self.schedule_playback_if_needed();
         }
         else if let Some(scene) = &mut self.scene
             && let Err(err) = scene.sync_layout(&self.compositor, &self.layout, &self.input)

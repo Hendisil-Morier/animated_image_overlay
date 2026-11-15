@@ -118,6 +118,7 @@ pub fn run_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayE
         configured: false,
         frame_callback_pending: false,
         dirty_save: false,
+        frame_timer_token: None,
         save_timer_token: None,
         fade_timer_token: None,
         exit_requested: false,
@@ -182,7 +183,7 @@ pub fn run_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayE
 
     loop_handle
         .insert_source(ping_source, |_, _, state| {
-            state.ensure_frame_callback_if_needed();
+            state.schedule_playback_if_needed();
         })
         .map_err(|err| WaylandError::EventLoop(err.to_string()))?;
 

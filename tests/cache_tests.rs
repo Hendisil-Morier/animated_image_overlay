@@ -250,3 +250,28 @@ fn cache_dir_honors_xdg_override_and_home_fallback()
     let missing = cache_dir_from_env(None, Some(OsStr::new("")));
     assert!(matches!(missing, Err(CacheError::DirectoryUnavailable)));
 }
+
+#[test]
+fn cache_with_delays_borrows_timing_slice_without_blocking_subsequent_frame_reads()
+{
+    let temp = TempCacheTestDir::new("with_delays");
+    let img_path = temp.path().join("anim.gif");
+    let cache_dir = temp.path().join("cache");
+    create_animated_gif(&img_path, 3, 12, 12);
+
+    let mut store = FrameCache::open_in_dir(&img_path, 500, 0, &cache_dir, 4096, 30, None)
+        .expect("cache should open");
+    while !store.is_decode_done()
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let (count, done) = store.with_delays(|delays, decode_done| (delays.len(), decode_done));
+    assert_eq!(count, 3);
+    assert!(done);
+    assert_eq!(
+        store.frame_argb(0).expect("frame 0 accessible").len(),
+        12 * 12 * 4
+    );
+    store.stop();
+}

@@ -207,13 +207,13 @@ impl OverlayScene
         Ok(())
     }
 
-    /// Uploads and commits a new animation frame onto the desynchronized image subsurface.
-    pub(crate) fn present_frame(&mut self, frame_argb: &[u8]) -> Result<(), OverlayError>
+    /// Uploads and attaches a new animation frame onto the desynchronized image subsurface.
+    ///
+    /// Callers commit `image_surface` separately after queuing any `wl_surface::frame` callback.
+    pub(crate) fn stage_frame(&mut self, frame_argb: &[u8]) -> Result<(), OverlayError>
     {
         self.frame_ring
-            .upload_and_attach(&self.image_surface, frame_argb)?;
-        self.image_surface.commit();
-        Ok(())
+            .upload_and_attach(&self.image_surface, frame_argb)
     }
 
     /// Updates image subsurface position/scale, handle visibility/hover, dashed border, and input region.

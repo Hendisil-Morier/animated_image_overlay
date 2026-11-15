@@ -172,11 +172,11 @@ impl FrameCache
         (guard.width, guard.height)
     }
 
-    /// Returns current buffered frame delays and whether all frames are loaded.
-    pub fn delays_snapshot(&self) -> (Vec<u32>, bool)
+    /// Invokes `visit` with borrowed frame delays and decode completion status without cloning.
+    pub fn with_delays<R>(&self, visit: impl FnOnce(&[u32], bool) -> R) -> R
     {
         let guard = lock_mutex(&self.shared);
-        (guard.delays_ms.clone(), guard.decode_done)
+        visit(&guard.delays_ms, guard.decode_done)
     }
 
     /// Returns total number of frames currently available in memory.

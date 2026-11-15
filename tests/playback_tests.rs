@@ -68,3 +68,19 @@ fn playback_enforces_minimum_delay_and_pause_resume()
     assert_eq!(clock.advance(100.0, &delays, true), TickOutcome::NoChange);
     assert_eq!(clock.next_deadline_ms(), Some(110.0));
 }
+
+#[test]
+fn playback_reports_remaining_ms_for_timer_wait_and_clears_while_paused()
+{
+    let mut clock = PlaybackClock::new();
+    let delays = [80, 120];
+
+    assert_eq!(clock.ms_until_next_frame(0.0), None);
+    assert_eq!(clock.advance(50.0, &delays, false), TickOutcome::NoChange);
+    assert_eq!(clock.ms_until_next_frame(50.0), Some(80));
+    assert_eq!(clock.ms_until_next_frame(74.2), Some(56));
+    assert_eq!(clock.ms_until_next_frame(130.0), Some(0));
+
+    assert!(clock.toggle_pause());
+    assert_eq!(clock.ms_until_next_frame(90.0), None);
+}
