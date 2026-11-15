@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Changed
+- Extracted software corner handle and dashed outline rasterization plus `ChromeGeometry` and `needs_chrome_rebuild` into `src/wayland/chrome_raster.rs`, keeping Wayland subsurface orchestration in `src/wayland/chrome.rs`.
+- Extracted SHM ring staging, `DisplayFrameCache` routing, and Lanczos3/rotation resampling (`FrameStage`, `compute_buffer_target_spec`, `ring_needs_resync`) into `src/wayland/frame_stage.rs`, and decomposed `OverlayScene::sync_layout_inner` (`src/wayland/scene.rs`), `run_overlay` (`src/wayland/app.rs`), `apply_input_effects` (`src/wayland/runtime.rs`), `apply_cap_overrides` (`src/cli.rs`), and `with_frame_argb` (`src/cache/store.rs`).
+- Unified startup frame-0 staging and steady-state animation staging through `FrameStage::stage_frame_slice` (`src/wayland/frame_stage.rs`), sizing startup `ImageBufferRing` allocations directly from `compute_buffer_target_spec`.
+
+### Fixed
+- Enabled startup and resize Lanczos3 downscaling (`resize_premultiplied_argb8888`) directly into SHM buffers for completed single-frame static images (`decode_done && frame_count == 1`) without allocating `DisplayFrameCache` slots.
+- Checked `OverlayScene::needs_buffer_resync` inside post-startup `LayerShellHandler::configure` events (`src/wayland/handlers.rs`) so compositor output size shrinks refresh SHM buffers cleanly while leaving persisted scale untouched in `apng-overlay.json`.
+
 ## [0.3.0] - 2026-11-15
 
 ### Added

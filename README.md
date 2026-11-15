@@ -84,7 +84,7 @@ Rust crate modules under `src/`:
 - `src/layout.rs` & `src/playback.rs`: Pure monitor-clamped geometry calculations and drift/stall-resilient frame clock.
 - `src/decode/`: Streaming APNG, GIF, animated WebP, and static decoding (`codecs.rs`, `pixel.rs`, `stream.rs`).
 - `src/cache/`: Deterministic `.lraw`/`.json` disk storage and 30-day pruning (`disk.rs`), configurable RAM LRU store (`memory.rs`), warm chunk reader (`reader.rs`), decode writer (`sink.rs`), and `FrameCache` facade (`store.rs`).
-- `src/wayland/`: `calloop` event-loop bootstrap (`app.rs`), runtime timer/state coordination (`runtime.rs`), Wayland protocol dispatch (`handlers.rs`), layer-shell/subsurface scene (`scene.rs`), display-resolution frame cache (`display_cache.rs`), corner handle and dashed border chrome (`chrome.rs`), `SlotPool` frame ring (`shm_ring.rs`), monitor lookup (`monitor.rs`), pointer state (`input.rs`), and triple-click/shortcut mapping (`shortcuts.rs`).
+- `src/wayland/`: `calloop` event-loop bootstrap (`app.rs`), runtime timer/state coordination (`runtime.rs`), Wayland protocol dispatch (`handlers.rs`), layer-shell/subsurface scene (`scene.rs`), frame resampling and SHM staging (`frame_stage.rs`), display-resolution frame cache (`display_cache.rs`), corner handle and dashed border chrome (`chrome.rs`), handle/outline pixel rasterizer (`chrome_raster.rs`), `SlotPool` frame ring (`shm_ring.rs`), monitor lookup (`monitor.rs`), pointer state (`input.rs`), and triple-click/shortcut mapping (`shortcuts.rs`).
 
 Run formatting, linting, Rust integration tests (`tests/`), and API doc checks:
 
