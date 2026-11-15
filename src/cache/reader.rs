@@ -54,10 +54,17 @@ pub(crate) fn try_open_cached_store(
     touch_modified(&paths.meta_path);
     touch_modified(&paths.lraw_path);
 
-    let mut state = SharedFrames::new(meta.w, meta.h, frame_byte_len, ram_budget_bytes);
-    state.compressed_frames.push(first_compressed);
-    state.delays_ms.push(meta.delays[0].max(MIN_FRAME_DELAY_MS));
-    state.insert_ram_frame(0, Arc::new(first_raw));
+    let single_frame = meta.delays.len() <= 1;
+    let shared = SharedFrames::with_first_frame(
+        meta.w,
+        meta.h,
+        frame_byte_len,
+        ram_budget_bytes,
+        first_compressed,
+        meta.delays[0].max(MIN_FRAME_DELAY_MS),
+        first_raw,
+        single_frame,
+    );
 
     let cache_dir = paths
         .lraw_path
@@ -65,18 +72,16 @@ pub(crate) fn try_open_cached_store(
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
 
-    if meta.delays.len() <= 1
+    if single_frame
     {
-        state.decode_done = true;
         return Some(FrameCache::from_parts(
             cache_dir,
-            Arc::new(Mutex::new(state)),
+            shared,
             Arc::clone(cancel),
             None,
         ));
     }
 
-    let shared = Arc::new(Mutex::new(state));
     let shared_worker = Arc::clone(&shared);
     let cancel_worker = Arc::clone(cancel);
     let lraw_path = paths.lraw_path.clone();

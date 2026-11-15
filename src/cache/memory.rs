@@ -48,26 +48,33 @@ pub(crate) struct SharedFrames
 
 impl SharedFrames
 {
-    /// Initializes empty shared state sized against frame 0 dimensions.
-    pub(crate) fn new(
+    /// Initializes synchronized frame storage pre-populated with frame 0 in compressed and RAM state.
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) fn with_first_frame(
         width: u32,
         height: u32,
         frame_byte_len: usize,
         ram_budget_bytes: usize,
-    ) -> Self
+        first_compressed: Vec<u8>,
+        first_delay_ms: u32,
+        first_argb: Vec<u8>,
+        decode_done: bool,
+    ) -> Arc<Mutex<Self>>
     {
-        Self {
+        let mut state = Self {
             width,
             height,
             frame_byte_len,
-            compressed_frames: Vec::new(),
-            delays_ms: Vec::new(),
-            decode_done: false,
+            compressed_frames: vec![first_compressed],
+            delays_ms: vec![first_delay_ms],
+            decode_done,
             ram_slots: HashMap::new(),
             lru_order: VecDeque::new(),
             ram_used_bytes: 0,
             ram_budget_bytes,
-        }
+        };
+        state.insert_ram_frame(0, Arc::new(first_argb));
+        Arc::new(Mutex::new(state))
     }
 
     /// Inserts or promotes an uncompressed frame in `ram_slots` within `ram_budget_bytes`.
@@ -125,7 +132,7 @@ pub(crate) fn append_batch(
     let has_items = !batch.is_empty();
     if has_items || done
     {
-        let mut guard = lock_shared(shared);
+        let mut guard = lock_mutex(shared);
         for (chunk, delay) in batch.drain(..)
         {
             guard.compressed_frames.push(chunk);
@@ -147,17 +154,17 @@ pub(crate) fn append_batch(
 /// Sets `decode_done = true` safely and triggers any registered event-loop wakeup callback.
 pub(crate) fn mark_decode_done(shared: &Arc<Mutex<SharedFrames>>, wakeup: Option<&WakeupCallback>)
 {
-    lock_shared(shared).decode_done = true;
+    lock_mutex(shared).decode_done = true;
     if let Some(notify) = wakeup
     {
         notify();
     }
 }
 
-/// Acquires the shared frame lock cleanly without panicking on mutex poison.
-pub(crate) fn lock_shared(shared: &Arc<Mutex<SharedFrames>>) -> MutexGuard<'_, SharedFrames>
+/// Acquires any mutex cleanly without panicking on mutex poison.
+pub(crate) fn lock_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T>
 {
-    match shared.lock()
+    match mutex.lock()
     {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),

@@ -10,7 +10,7 @@ use std::{
 // Cache disk writers, shared frame buffer state, and decoder stream traits.
 use super::{
     disk::{CachePaths, prune_cache, write_cache_metadata},
-    memory::{SharedFrames, WakeupCallback, append_batch},
+    memory::{SharedFrames, WakeupCallback, append_batch, lock_mutex},
 };
 use crate::{
     atomic_fs::AtomicTempFile,
@@ -103,23 +103,18 @@ impl FrameStreamSink for DecodeCacheSink
         self.height = frame.height;
         let frame_bytes = checked_argb_byte_len(frame.width, frame.height)?;
 
-        let mut state = SharedFrames::new(
+        let shared = SharedFrames::with_first_frame(
             frame.width,
             frame.height,
             frame_bytes,
             self.ram_budget_bytes,
+            frame.lz4_payload.clone(),
+            frame.delay_ms,
+            frame.argb8888.clone(),
+            false,
         );
-        state.compressed_frames.push(frame.lz4_payload.clone());
-        state.delays_ms.push(frame.delay_ms);
-        state.insert_ram_frame(0, Arc::new(frame.argb8888.clone()));
-
-        let shared = Arc::new(Mutex::new(state));
         self.shared = Some(Arc::clone(&shared));
-        match self.shared_handoff.lock()
-        {
-            Ok(mut slot) => *slot = Some(shared),
-            Err(poisoned) => *poisoned.into_inner() = Some(shared),
-        }
+        *lock_mutex(&self.shared_handoff) = Some(shared);
 
         self.all_delays.push(frame.delay_ms);
         self.all_sizes.push(frame.lz4_payload.len());

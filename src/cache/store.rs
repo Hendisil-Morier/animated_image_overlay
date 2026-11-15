@@ -17,7 +17,7 @@ use lz4_flex::decompress_size_prepended;
 // Internal cache disk helpers, RAM LRU state, warm reader, and decode sink.
 use super::{
     disk::{DEFAULT_PRUNE_AGE_DAYS, compute_cache_paths, default_cache_dir, prune_cache},
-    memory::{DEFAULT_RAM_CACHE_BUDGET_BYTES, SharedFrames, WakeupCallback, lock_shared},
+    memory::{DEFAULT_RAM_CACHE_BUDGET_BYTES, SharedFrames, WakeupCallback, lock_mutex},
     reader::try_open_cached_store,
     sink::DecodeCacheSink,
 };
@@ -109,11 +109,7 @@ impl FrameCache
             sink,
         )?;
 
-        let existing = match shared_slot.lock()
-        {
-            Ok(mut guard) => guard.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
+        let existing = lock_mutex(&shared_slot).take();
 
         let shared = match existing
         {
@@ -121,13 +117,16 @@ impl FrameCache
             None =>
             {
                 let byte_len = checked_argb_byte_len(first.width, first.height)?;
-                let mut state =
-                    SharedFrames::new(first.width, first.height, byte_len, ram_budget_bytes);
-                state.compressed_frames.push(first.lz4_payload);
-                state.delays_ms.push(first.delay_ms);
-                state.decode_done = worker.is_none();
-                state.insert_ram_frame(0, Arc::new(first.argb8888));
-                Arc::new(Mutex::new(state))
+                SharedFrames::with_first_frame(
+                    first.width,
+                    first.height,
+                    byte_len,
+                    ram_budget_bytes,
+                    first.lz4_payload,
+                    first.delay_ms,
+                    first.argb8888,
+                    worker.is_none(),
+                )
             }
         };
 
@@ -169,40 +168,40 @@ impl FrameCache
     /// Returns stored pixel `(width, height)` for this overlay.
     pub fn frame_dimensions(&self) -> (u32, u32)
     {
-        let guard = lock_shared(&self.shared);
+        let guard = lock_mutex(&self.shared);
         (guard.width, guard.height)
     }
 
     /// Returns current buffered frame delays and whether all frames are loaded.
     pub fn delays_snapshot(&self) -> (Vec<u32>, bool)
     {
-        let guard = lock_shared(&self.shared);
+        let guard = lock_mutex(&self.shared);
         (guard.delays_ms.clone(), guard.decode_done)
     }
 
     /// Returns total number of frames currently available in memory.
     pub fn frame_count(&self) -> usize
     {
-        lock_shared(&self.shared).compressed_frames.len()
+        lock_mutex(&self.shared).compressed_frames.len()
     }
 
     /// Returns `true` when background streaming or decoding has completed.
     pub fn is_decode_done(&self) -> bool
     {
-        lock_shared(&self.shared).decode_done
+        lock_mutex(&self.shared).decode_done
     }
 
     /// Returns current uncompressed RAM bytes held in the frame LRU cache.
     pub fn ram_used_bytes(&self) -> usize
     {
-        lock_shared(&self.shared).ram_used_bytes
+        lock_mutex(&self.shared).ram_used_bytes
     }
 
     /// Retrieves premultiplied `ARGB8888` pixel data for `index`, decompressing via LZ4 on RAM misses.
     pub fn frame_argb(&self, index: usize) -> Result<Arc<Vec<u8>>, OverlayError>
     {
         let (compressed, expected_len) = {
-            let mut guard = lock_shared(&self.shared);
+            let mut guard = lock_mutex(&self.shared);
             if let Some(hit) = guard.ram_slots.get(&index).map(Arc::clone)
             {
                 guard.promote_lru(index);
@@ -241,7 +240,7 @@ impl FrameCache
         }
 
         let arc = Arc::new(raw);
-        let mut guard = lock_shared(&self.shared);
+        let mut guard = lock_mutex(&self.shared);
         guard.insert_ram_frame(index, Arc::clone(&arc));
         Ok(arc)
     }
