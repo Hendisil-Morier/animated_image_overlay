@@ -85,7 +85,7 @@ pub(crate) struct OverlayRuntime
     // Canonical absolute file key identifying this image in configuration storage.
     pub(crate) config_key: String,
 
-    // LZ4 disk cache and 128 MiB RAM LRU store feeding rendered animation frames.
+    // LZ4 disk cache and configurable RAM LRU store feeding rendered animation frames.
     pub(crate) cache: FrameCache,
 
     // Fullscreen layer surface, frame ring, and corner-handle/border subsurfaces.

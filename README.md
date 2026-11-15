@@ -18,7 +18,7 @@ cargo build --release
 Run the overlay:
 
 ```bash
-./target/release/animated_image_widget FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE] [-r RAM_CACHE_MB] [-c ram=<MB>,display=<MB>] [-e] [-d]
+./target/release/animated_image_widget FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE] [-r RAM_CACHE_MB] [-c ram=<MB>,display=<MB>]... [-e] [-d]
 ```
 
 Options:
@@ -27,12 +27,17 @@ Options:
 - `-w`, `--base-width`: Width in pixels used for stored cache frames (default: `500`; never upscales smaller files).
 - `-m`, `--monitor`: Target monitor index or connector name such as `DP-1` (default: `0`).
 - `-s`, `--scale`: Initial display scale, overriding any saved scale for that file.
-- `-r`, `--ram-cache-mb`: RAM limit in MiB for keeping short animations unpacked in memory; larger files read one frame at a time from disk (`0` always reads from disk; default: `128`).
-- `-c`, `--cap`: Comma-separated memory ceilings in MiB accepting `ram=<MB>` and `display=<MB>` in either order (`-c ram=10`, `-c display=32`, `-c ram=10,display=32`; `0` disables that cache; defaults: `ram=128,display=64`).
+- `-r`, `--ram-cache-mb`: RAM limit in MiB for keeping short animations unpacked in memory; larger files read one frame at a time from disk (`0` always reads from disk; default: `128`; overridden if `-c ram=<MB>` is also given).
+- `-c`, `--cap`: Repeatable comma-separated memory ceilings in MiB accepting `ram=<MB>` and `display=<MB>` individually or together (`-c ram=10`, `-c display=32`, `-c ram=10,display=32`, `-c ram=10 -c display=32`; `0` disables that tier; defaults: `ram=128,display=64`). When both `-r` and `-c ram=<MB>` are supplied, `-c ram` takes precedence regardless of argument order.
 - `-e`, `--edit`: Launch directly into interactive edit mode.
-- `-d`, `--debug`: Print debug logs to the terminal alongside the daily log files in `~/.cache/apng-overlay/logs/` (same as setting `OVERLAY_DEBUG=1`).
+- `-d`, `--debug`: Mirror `DEBUG`-level diagnostics to stdout alongside the rolling daily log files under `$XDG_CACHE_HOME/apng-overlay/logs/`.
 
-Pass `-d` / `--debug` (or set `OVERLAY_DEBUG=1`) to mirror debug diagnostics to stdout alongside the rolling daily log files in `~/.cache/apng-overlay/logs/`.
+### Environment Variables
+
+- `WAYLAND_DISPLAY`: Target compositor socket used when connecting via `Connection::connect_to_env()`.
+- `XDG_CONFIG_HOME`: Overrides `~/.config` for `apng-overlay.json` and `apng-overlay.json.lock` when set and non-empty.
+- `XDG_CACHE_HOME`: Overrides `~/.cache` for `<cache>/apng-overlay/` frame caches and `<cache>/apng-overlay/logs/`.
+- `OVERLAY_DEBUG`: Enables stdout `DEBUG` logging alongside disk logs for any non-empty value other than `0`, `false`, or `no` (case-insensitive).
 
 ## Controls
 
@@ -43,13 +48,13 @@ Pointer controls:
 - **Right-drag**: Resize anchored from the top-left corner toward the bottom-right.
 - **Scroll wheel**: Scale up or down continuously.
 - **Triple-click (left button, 400 ms / 4 px)**: Toggle edit mode on the corner handle (or anywhere on the overlay while editing), expanding pointer input to the full overlay with a 1 px dashed outline and enabling keyboard shortcuts (`KeyboardInteractivity::OnDemand`).
-- **Middle-click on handle**: Quit cleanly.
+- **Middle-click on handle**: Quit cleanly (passive mode restricts pointer input to the handle; edit mode restricts middle-click quit strictly to the handle bounds).
 
 Edit-mode keyboard shortcuts:
 - `Esc` (or triple-click): Exit edit mode back to passive click-through playback.
-- `q`: Quit cleanly.
-- Arrow keys or `h` / `j` / `k` / `l`: Nudge position by `10 px`.
-- `+` / `=` / `-`: Step scale up or down.
+- `q` / `Q`: Quit cleanly.
+- Arrow keys or `h` / `j` / `k` / `l`: Nudge position by `12 px`.
+- `+` / `=` / `_` / `-` (or keypad `+` / `-`): Step scale up or down.
 - `r` / `R`: Rotate 90 degrees clockwise or counter-clockwise.
 - `[` / `]`: Rotate 5 degrees counter-clockwise or clockwise (repeatable when held).
 - `0`: Reset rotation back to `0` degrees upright.
@@ -61,32 +66,33 @@ Signals:
 
 ## Configuration, Cache, and Logs
 
-- `~/.config/apng-overlay.json`: Stores `x`, `y`, `scale`, `rotation` (degrees in `[0.0, 360.0)`, using zero-copy compositor transforms on exact 90-degree multiples and smooth bilinear CPU resampling at fractional angles), and `flipped` (`true` or `false`) per canonical absolute file path using 500 ms debounced writes guarded by an exclusive `flock` on `~/.config/apng-overlay.json.lock` and atomic temp-file replacement.
-- `~/.cache/apng-overlay/`: Stores `lz4_flex`-compressed premultiplied `ARGB8888` chunks (`.lraw`) and `.json` metadata written strictly after `.lraw`. Frame 0 displays immediately while remaining frames stream in the background. Active cache entries refresh timestamps on hits, entries older than 30 days (`.json`, `.raw`, `.zraw`, `.lraw`) are pruned automatically at startup, and two independent RAM tiers control playback caching:
+- **`$XDG_CONFIG_HOME/apng-overlay.json` (default `~/.config/apng-overlay.json`)**: Stores `x`, `y`, `scale`, `rotation` (degrees in `[0.0, 360.0)`, using zero-copy compositor transforms on exact 90-degree multiples and smooth bilinear CPU resampling at fractional angles), and `flipped` (`true` or `false`) keyed by lexically normalized absolute file path (`. ` / `..` collapsed without dereferencing symlinks). Uses `500 ms` debounced saves serialized with an exclusive `flock` on `<config>.lock` and atomic temp-file replacement so concurrent instances preserve one another's entries.
+- **`$XDG_CACHE_HOME/apng-overlay/` (default `~/.cache/apng-overlay/`)**: Stores headerless `lz4_flex`-compressed premultiplied `ARGB8888` chunks (`.lraw`) and sidecar `.json` metadata written strictly after `.lraw`. Frame 0 displays immediately while remaining frames stream in the background. Active cache entries refresh timestamps on hits, entries older than 30 days (`.json`, `.raw`, `.zraw`, `.lraw`) are pruned automatically at startup, and two independent RAM tiers control playback caching:
   - Source LRU (`-r` / `-c ram`, default `128 MiB`): Keeps decoded full-frame buffers in RAM for zero-copy streaming when the entire unpacked loop fits budget, switching dynamically to positional `.lraw` disk chunk streaming on larger files.
   - Display Cache (`-c display`, default `64 MiB`): Stores rendered fractional rotations and Lanczos3-downscaled oversized quarter-turn frames (`DisplayFrameCache` paired with compositor `set_buffer_transform`) at physical display resolution, dropping steady-state CPU from continuous LZ4 decompression (`~32%` core) to lightweight SHM `memcpy` (`< 1%` core) while bypassing caching cleanly on large overlays.
-- `~/.cache/apng-overlay/logs/`: Daily rotating log files (`apng-overlay.*.log`, retaining up to 7 files).
+- **`$XDG_CACHE_HOME/apng-overlay/logs/` (default `~/.cache/apng-overlay/logs/`)**: Daily rotating log files (`apng-overlay.*.log`, retaining up to 7 files).
 
-Architecture notes and CPU/memory benchmarks are documented in [docs/decisions/001-display-cache-and-resampling.md](docs/decisions/001-display-cache-and-resampling.md), [docs/CHANGELOG.md](docs/CHANGELOG.md), and [docs/CODING_STYLE.md](docs/CODING_STYLE.md).
+Architecture internals, wire formats, and CPU/memory benchmarks are documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/decisions/001-display-cache-and-resampling.md](docs/decisions/001-display-cache-and-resampling.md), [docs/CHANGELOG.md](docs/CHANGELOG.md), and [docs/CODING_STYLE.md](docs/CODING_STYLE.md).
 
 ## Structure and Tests
 
 Rust crate modules under `src/`:
 - `src/main.rs` & `src/cli.rs`: Signal masking setup, `clap` CLI validation, and runtime entry point.
 - `src/logging.rs`: Dual-output `tracing` setup with panic flush hook.
-- `src/error.rs` & `src/atomic_fs.rs`: Typed `thiserror` errors and RAII atomic temp-file writers.
-- `src/config.rs`: `flock`-serialized JSON config persistence and corruption recovery.
+- `src/error.rs`, `src/atomic_fs.rs`, & `src/xdg.rs`: Typed `thiserror` errors, RAII atomic temp-file writers, and shared XDG directory lookup.
+- `src/config.rs`: `flock`-serialized JSON config persistence and per-field corruption recovery.
 - `src/layout.rs` & `src/playback.rs`: Pure monitor-clamped geometry calculations and drift/stall-resilient frame clock.
 - `src/decode/`: Streaming APNG, GIF, animated WebP, and static decoding (`codecs.rs`, `pixel.rs`, `stream.rs`).
-- `src/cache/`: Deterministic `.lraw`/`.json` disk storage and 30-day pruning (`disk.rs`), 128 MiB RAM LRU store (`memory.rs`), warm chunk reader (`reader.rs`), decode writer (`sink.rs`), and `FrameCache` facade (`store.rs`).
+- `src/cache/`: Deterministic `.lraw`/`.json` disk storage and 30-day pruning (`disk.rs`), configurable RAM LRU store (`memory.rs`), warm chunk reader (`reader.rs`), decode writer (`sink.rs`), and `FrameCache` facade (`store.rs`).
 - `src/wayland/`: `calloop` event-loop bootstrap (`app.rs`), runtime timer/state coordination (`runtime.rs`), Wayland protocol dispatch (`handlers.rs`), layer-shell/subsurface scene (`scene.rs`), display-resolution frame cache (`display_cache.rs`), corner handle and dashed border chrome (`chrome.rs`), `SlotPool` frame ring (`shm_ring.rs`), monitor lookup (`monitor.rs`), pointer state (`input.rs`), and triple-click/shortcut mapping (`shortcuts.rs`).
 
-Run formatting, linting, and Rust integration tests (all under `tests/`):
+Run formatting, linting, Rust integration tests (`tests/`), and API doc checks:
 
 ```bash
 cargo +nightly fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+cargo rustdoc --lib -- -D warnings
 ```
 
 The original Python + GTK 4 implementation and its test suite remain archived under `python_scripts/` for reference and comparison:

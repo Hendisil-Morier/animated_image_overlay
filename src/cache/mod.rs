@@ -1,9 +1,9 @@
-//! LZ4 `.lraw` + `.json` frame cache with 30-day pruning and 128 MiB RAM LRU budget.
+//! LZ4 `.lraw` + `.json` frame cache with 30-day pruning and configurable RAM LRU budget.
 
 // On-disk cache key hashing, `.json` metadata validation, and 30-day file pruning.
 pub mod disk;
 
-// Synchronized in-memory compressed storage and 128 MiB uncompressed RAM LRU cache.
+// Synchronized in-memory compressed storage and configurable uncompressed RAM LRU cache.
 pub mod memory;
 
 // Warm `.lraw` cache loading and batched background chunk reader.

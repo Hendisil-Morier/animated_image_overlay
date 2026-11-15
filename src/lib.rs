@@ -8,7 +8,7 @@
 // Crash-safe atomic sibling temporary file writes shared across config and cache.
 pub(crate) mod atomic_fs;
 
-// LZ4 disk + 128 MiB RAM frame cache with 30-day pruning and fallback recovery.
+// LZ4 disk + configurable RAM LRU frame cache with 30-day pruning and fallback recovery.
 pub mod cache;
 
 // Command-line flag parsing and input validation.

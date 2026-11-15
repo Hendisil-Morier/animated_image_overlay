@@ -30,12 +30,12 @@ const CONTROLS_HELP: &str = "\
 Controls:
   Left-drag / Right-drag / Scroll   Move, resize, or zoom (corner handle, or anywhere in edit mode)
   Triple-click                      Toggle interactive edit mode
-  Middle-click                      Quit overlay (corner handle only while in edit mode)
+  Middle-click                      Quit overlay (on corner handle)
 
 Edit mode keys:
   Esc                               Exit edit mode back to click-through playback
-  Arrows / hjkl                     Nudge overlay position
-  + / -                             Zoom scale up or down
+  Arrows / hjkl                     Nudge overlay position (12 px)
+  + / - (= / _ / numpad + / -)      Zoom scale up or down
   r / R                             Rotate 90 degrees clockwise or counter-clockwise
   [ / ]                             Rotate 5 degrees counter-clockwise or clockwise
   0                                 Reset rotation to 0 degrees
@@ -109,7 +109,7 @@ pub struct CliArgs
         short = 'r',
         long = "ram-cache-mb",
         default_value_t = DEFAULT_RAM_CACHE_MB,
-        help = "RAM limit in MiB for keeping animations unpacked in memory (0 = read from disk)."
+        help = "RAM limit in MiB for source frames (overridden by -c ram=<MB>; 0 = read from disk)."
     )]
     pub ram_cache_mb: usize,
 
@@ -119,7 +119,7 @@ pub struct CliArgs
         long = "cap",
         value_name = "SPEC",
         action = ArgAction::Append,
-        help = "Cache MiB caps as key=value pairs (e.g. -c ram=128,display=64; 0 disables)."
+        help = "Cache MiB caps as key=value (repeatable; ram=<MB> overrides -r; e.g. -c ram=128,display=64; 0 disables)."
     )]
     pub cap: Vec<String>,
 

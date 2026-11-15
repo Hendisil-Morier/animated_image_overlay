@@ -1,4 +1,4 @@
-//! Synchronized in-memory compressed chunks, 128 MiB uncompressed RAM LRU cache, and batch signals.
+//! Synchronized in-memory compressed chunks, configurable uncompressed RAM LRU cache, and batch signals.
 
 // Collections and thread-safe mutex coordination.
 use std::{
@@ -16,7 +16,7 @@ pub type WakeupCallback = Arc<dyn Fn() + Send + Sync>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ChunkSpan
 {
-    /// Byte offset from the beginning of the `.lraw` file after the magic header.
+    /// Byte offset from the start of the headerless `.lraw` file.
     pub(crate) offset: u64,
 
     /// Compressed chunk length in bytes.
