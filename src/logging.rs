@@ -1,6 +1,6 @@
 //! Dual-output tracing diagnostics for console output and non-blocking log files.
 //!
-//! Console diagnostics stay silent unless `OVERLAY_DEBUG` enables verbose output,
+//! Console diagnostics stay silent unless `--debug` or `OVERLAY_DEBUG` enables verbose output,
 //! while daily-rotated log files under `~/.cache/apng-overlay/logs/` capture
 //! structured operational events with explicit flush on drop or panic.
 
@@ -192,11 +192,17 @@ pub fn init_logging_in_dir(
     Ok(guard)
 }
 
-/// Initializes global dual-output logging using the default cache directory and `OVERLAY_DEBUG`.
+/// Initializes global dual-output logging honoring `OVERLAY_DEBUG`.
 pub fn init_logging() -> Result<LoggingGuard, OverlayError>
 {
+    init_logging_with_debug(false)
+}
+
+/// Initializes global dual-output logging honoring both `--debug` and `OVERLAY_DEBUG`.
+pub fn init_logging_with_debug(cli_debug: bool) -> Result<LoggingGuard, OverlayError>
+{
     let logs_dir = default_logs_dir()?;
-    let console_debug = is_debug_env_enabled();
+    let console_debug = cli_debug || is_debug_env_enabled();
     init_logging_in_dir(&logs_dir, console_debug)
 }
 

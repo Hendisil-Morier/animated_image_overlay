@@ -1,8 +1,8 @@
 //! Command-line argument parsing and validation for the Wayland image overlay.
 //!
 //! Preserves exact CLI parity with the Python launcher (`FILE`, `-n`/`--max-frames`,
-//! `-w`/`--base-width`, `-m`/`--monitor`, `-s`/`--scale`, `-r`/`--ram-cache-mb`, and `-e`/`--edit`)
-//! while rejecting non-positive widths, overflowed cache limits, invalid scales, and missing files.
+//! `-w`/`--base-width`, `-m`/`--monitor`, `-s`/`--scale`, `-r`/`--ram-cache-mb`, `-e`/`--edit`,
+//! and `-d`/`--debug`) while rejecting invalid numeric inputs and missing files.
 
 // Standard path and OS argument string types.
 use std::{ffi::OsString, path::PathBuf};
@@ -97,12 +97,12 @@ pub struct CliArgs
     )]
     pub scale: Option<f64>,
 
-    /// Uncompressed frame RAM cache budget in MiB (`0` = stream every frame from disk, default: `128`).
+    /// Memory limit in MiB for keeping animations unpacked in RAM (`0` = read from disk, default: `128`).
     #[arg(
         short = 'r',
         long = "ram-cache-mb",
         default_value_t = DEFAULT_RAM_CACHE_MB,
-        help = "Uncompressed RAM cache budget in MiB (0 = stream from disk, default: 128)."
+        help = "RAM limit in MiB for keeping animations unpacked in memory (0 = read from disk)."
     )]
     pub ram_cache_mb: usize,
 
@@ -113,6 +113,14 @@ pub struct CliArgs
         help = "Start in interactive edit mode (border and keyboard shortcuts enabled)."
     )]
     pub edit: bool,
+
+    /// Mirror debug diagnostics to stdout alongside rolling daily log files.
+    #[arg(
+        short = 'd',
+        long = "debug",
+        help = "Print debug logs to stdout alongside daily log files."
+    )]
+    pub debug: bool,
 }
 
 impl CliArgs

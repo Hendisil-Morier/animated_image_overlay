@@ -18,7 +18,7 @@ cargo build --release
 Run the overlay:
 
 ```bash
-./target/release/animated_image_widget FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE] [-r RAM_CACHE_MB] [-e]
+./target/release/animated_image_widget FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE] [-r RAM_CACHE_MB] [-e] [-d]
 ```
 
 Options:
@@ -27,10 +27,11 @@ Options:
 - `-w`, `--base-width`: Width in pixels used for stored cache frames (default: `500`; never upscales smaller files).
 - `-m`, `--monitor`: Target monitor index or connector name such as `DP-1` (default: `0`).
 - `-s`, `--scale`: Initial display scale, overriding any saved scale for that file.
-- `-r`, `--ram-cache-mb`: Uncompressed frame RAM cache budget in MiB (`0` streams all frames from disk; default: `128`).
+- `-r`, `--ram-cache-mb`: RAM limit in MiB for keeping short animations unpacked in memory; larger files read one frame at a time from disk (`0` always reads from disk; default: `128`).
 - `-e`, `--edit`: Launch directly into interactive edit mode.
+- `-d`, `--debug`: Print debug logs to the terminal alongside the daily log files in `~/.cache/apng-overlay/logs/` (same as setting `OVERLAY_DEBUG=1`).
 
-Set `OVERLAY_DEBUG=1` to mirror debug diagnostics to stdout alongside the rolling daily log files in `~/.cache/apng-overlay/logs/`.
+Pass `-d` / `--debug` (or set `OVERLAY_DEBUG=1`) to mirror debug diagnostics to stdout alongside the rolling daily log files in `~/.cache/apng-overlay/logs/`.
 
 ## Controls
 

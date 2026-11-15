@@ -40,7 +40,7 @@ fn main() -> ExitCode
         }
     };
 
-    let log_guard = match logging::init_logging()
+    let log_guard = match logging::init_logging_with_debug(cli.debug)
     {
         Ok(guard) => guard,
         Err(err) =>
@@ -56,6 +56,8 @@ fn main() -> ExitCode
         base_width = cli.base_width,
         monitor = %cli.monitor,
         scale = ?cli.scale,
+        ram_cache_mb = cli.ram_cache_mb,
+        debug = cli.debug,
         "Starting Wayland animated image overlay"
     );
 
