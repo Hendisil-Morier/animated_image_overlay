@@ -33,10 +33,12 @@ use super::{
     shm_ring::{ImageBufferRing, create_argb_buffer, shm_pool_err},
 };
 use crate::{
-    decode::BYTES_PER_PIXEL,
     error::{OverlayError, WaylandError},
-    layout::{HANDLE_SIZE, OverlayLayout},
+    layout::OverlayLayout,
 };
+
+// Dedicated 4 KiB pool capacity backing the 1x1 transparent parent layer buffer.
+const PARENT_POOL_BYTES: usize = 4096;
 
 /// Creates a desynchronized child subsurface with empty click-through input region.
 pub(crate) fn create_desync_passive_subsurface<D>(
@@ -75,8 +77,8 @@ pub(crate) struct OverlayScene
     // Reusable 1x1 transparent SHM buffer mapped onto `parent_layer`.
     parent_transparent_buf: Buffer,
 
-    // Owns the shared memory file backing parent transparent buffer, handle, and edit borders.
-    _chrome_pool: SlotPool,
+    // Dedicated shared memory pool holding `parent_transparent_buf`.
+    _parent_pool: SlotPool,
 
     // Reusable frame ring backing `image_surface`.
     frame_ring: ImageBufferRing,
@@ -142,22 +144,19 @@ impl OverlayScene
 
         let sw = (monitor.width.max(1)) as u32;
         let sh = (monitor.height.max(1)) as u32;
-        let handle_bytes = (HANDLE_SIZE as usize) * (HANDLE_SIZE as usize) * BYTES_PER_PIXEL;
-        let chrome_bytes =
-            64 + handle_bytes * 2 + ((sw + sh) as usize) * 2 * BYTES_PER_PIXEL + 4096;
-        let mut chrome_pool = SlotPool::new(chrome_bytes, shm).map_err(shm_pool_err)?;
+        let mut parent_pool = SlotPool::new(PARENT_POOL_BYTES, shm).map_err(shm_pool_err)?;
 
-        let (parent_transparent_buf, parent_slice) = create_argb_buffer(&mut chrome_pool, 1, 1)?;
+        let (parent_transparent_buf, parent_slice) = create_argb_buffer(&mut parent_pool, 1, 1)?;
         parent_slice.fill(0);
 
         let chrome = OverlayChrome::create(
             qh,
             subcompositor,
             viewporter,
+            shm,
             &parent_wl,
             &image_surface,
             &empty_region,
-            &mut chrome_pool,
             sw as i32,
             sh as i32,
         )?;
@@ -171,7 +170,7 @@ impl OverlayScene
             image_viewport,
             parent_viewport,
             parent_transparent_buf,
-            _chrome_pool: chrome_pool,
+            _parent_pool: parent_pool,
             frame_ring,
             chrome,
             screen_width: sw,
@@ -184,6 +183,7 @@ impl OverlayScene
     pub(crate) fn initialize_first_frame(
         &mut self,
         compositor: &CompositorState,
+        shm: &Shm,
         layout: &OverlayLayout,
         input: &InputState,
         frame0_argb: &[u8],
@@ -203,7 +203,40 @@ impl OverlayScene
             .upload_and_attach(&self.image_surface, frame0_argb)?;
         self.image_surface.commit();
 
-        self.sync_layout(compositor, layout, input)?;
+        self.sync_layout(compositor, shm, layout, input)?;
+        Ok(())
+    }
+
+    /// Rebuilds handle and dashed outline buffers when compositor `preferred_buffer_scale` changes.
+    pub(crate) fn update_chrome_scale(
+        &mut self,
+        shm: &Shm,
+        target_scale: i32,
+        layout: &OverlayLayout,
+        input: &InputState,
+        configured: bool,
+    ) -> Result<(), OverlayError>
+    {
+        let clamped_scale = target_scale.max(1);
+        if clamped_scale == self.chrome.scale()
+        {
+            return Ok(());
+        }
+
+        let (sw, sh) = layout.screen_size();
+        let rect = layout.overlay_rect();
+        let need_w = (sw as i32).max(rect.width as i32);
+        let need_h = (sh as i32).max(rect.height as i32);
+        let _retired_pool =
+            self.chrome
+                .ensure_scale_and_bounds(shm, clamped_scale, need_w, need_h)?;
+
+        if configured && _retired_pool.is_some()
+        {
+            self.chrome
+                .sync_all(shm, (sw, sh), rect, layout.input_rect(false), input)?;
+            self.parent_layer.wl_surface().commit();
+        }
         Ok(())
     }
 
@@ -220,6 +253,7 @@ impl OverlayScene
     pub(crate) fn sync_layout(
         &mut self,
         compositor: &CompositorState,
+        shm: &Shm,
         layout: &OverlayLayout,
         input: &InputState,
     ) -> Result<(), OverlayError>
@@ -238,7 +272,8 @@ impl OverlayScene
             .set_destination(rect.width as i32, rect.height as i32);
 
         let handle_rect = layout.input_rect(false);
-        self.chrome.sync_all(rect, handle_rect, input)?;
+        self.chrome
+            .sync_all(shm, (sw, sh), rect, handle_rect, input)?;
 
         if input.editing != self.last_editing
         {

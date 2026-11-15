@@ -237,7 +237,8 @@ impl OverlayRuntime
         {
             if effects.layout_changed || effects.edit_mode_changed.is_some()
             {
-                if let Err(err) = scene.sync_layout(&self.compositor, &self.layout, &self.input)
+                if let Err(err) =
+                    scene.sync_layout(&self.compositor, &self.shm, &self.layout, &self.input)
                 {
                     tracing::warn!(error = %err, "Failed syncing Wayland overlay layout");
                 }

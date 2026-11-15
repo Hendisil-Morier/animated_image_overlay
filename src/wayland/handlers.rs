@@ -13,7 +13,10 @@ use smithay_client_toolkit::{
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
         pointer::{PointerEvent, PointerEventKind, PointerHandler, ThemeSpec},
     },
-    shell::wlr_layer::{LayerShellHandler, LayerSurface, LayerSurfaceConfigure},
+    shell::{
+        WaylandSurface,
+        wlr_layer::{LayerShellHandler, LayerSurface, LayerSurfaceConfigure},
+    },
     shm::{Shm, ShmHandler},
 };
 // Raw Wayland connection, dispatch traits, and protocol object handles.
@@ -66,8 +69,31 @@ impl ShmHandler for OverlayRuntime
 
 impl CompositorHandler for OverlayRuntime
 {
-    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlSurface, _: i32)
+    fn scale_factor_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        surface: &WlSurface,
+        new_factor: i32,
+    )
     {
+        let Some(scene) = &mut self.scene
+        else
+        {
+            return;
+        };
+        if *surface != *scene.parent_layer.wl_surface()
+        {
+            return;
+        }
+
+        let scale = new_factor.max(1);
+        tracing::debug!(scale, "Compositor updated surface buffer scale");
+        if let Err(err) =
+            scene.update_chrome_scale(&self.shm, scale, &self.layout, &self.input, self.configured)
+        {
+            tracing::warn!(error = %err, scale, "Failed scaling overlay chrome buffers");
+        }
     }
 
     fn transform_changed(
@@ -139,6 +165,7 @@ impl LayerShellHandler for OverlayRuntime
                 && let Some(scene) = &mut self.scene
                 && let Err(err) = scene.initialize_first_frame(
                     &self.compositor,
+                    &self.shm,
                     &self.layout,
                     &self.input,
                     &frame0,
@@ -155,7 +182,8 @@ impl LayerShellHandler for OverlayRuntime
             self.schedule_playback_if_needed();
         }
         else if let Some(scene) = &mut self.scene
-            && let Err(err) = scene.sync_layout(&self.compositor, &self.layout, &self.input)
+            && let Err(err) =
+                scene.sync_layout(&self.compositor, &self.shm, &self.layout, &self.input)
         {
             tracing::warn!(error = %err, "Failed syncing Wayland overlay layout on configure");
         }

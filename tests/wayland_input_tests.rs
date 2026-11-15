@@ -6,7 +6,9 @@ use animated_image_widget::{
     layout::{KEYBOARD_NUDGE_PX, OverlayLayout},
     wayland::{
         ClickTracker, InputState, KeyShortcut, MonitorDescriptor, PointerCursor,
-        TRIPLE_CLICK_WINDOW_MS, map_edit_keysym, resolve_monitor_index,
+        TRIPLE_CLICK_WINDOW_MS,
+        chrome::{ChromeGeometry, needs_chrome_rebuild},
+        map_edit_keysym, resolve_monitor_index,
     },
 };
 use smithay_client_toolkit::seat::{
@@ -377,4 +379,42 @@ fn startup_edit_mode_enables_shortcuts_and_keeps_handle_visible()
     assert!(nudged.layout_changed);
     assert!(nudged.schedule_save);
     assert_eq!(layout.state().y, 150.0 + KEYBOARD_NUDGE_PX);
+}
+
+#[test]
+fn chrome_geometry_and_rebuild_policy_scale_hidpi_and_monitor_growth()
+{
+    let g1 = ChromeGeometry::for_scale(0);
+    assert_eq!(g1.scale, 1);
+    assert_eq!(g1.handle_px, 28);
+    assert_eq!(g1.handle_radius_px, 8);
+    assert_eq!(g1.outline_thickness_px, 1);
+    assert_eq!(g1.dash_period_px, 12);
+
+    let g2 = ChromeGeometry::for_scale(2);
+    assert_eq!(g2.scale, 2);
+    assert_eq!(g2.handle_px, 56);
+    assert_eq!(g2.handle_radius_px, 16);
+    assert_eq!(g2.outline_thickness_px, 2);
+    assert_eq!(g2.dash_period_px, 24);
+    assert_eq!(g2.edge_buffer_size(1920, true), (3840, 2));
+    assert_eq!(g2.edge_buffer_size(1080, false), (2, 2160));
+    assert_eq!(g2.edge_viewport_crop(420, 1920, true), (840.0, 2.0, 420, 1));
+    assert_eq!(
+        g2.edge_viewport_crop(2400, 1920, true),
+        (3840.0, 2.0, 1920, 1)
+    );
+
+    // Unchanged scale with equal or smaller dimensions skips pool rebuilding.
+    assert_eq!(needs_chrome_rebuild(2, 2560, 1440, 2, 1920, 1080), None);
+    // Larger configured dimensions trigger monotonic growth without changing scale.
+    assert_eq!(
+        needs_chrome_rebuild(2, 1920, 1080, 2, 2560, 1440),
+        Some((2, 2560, 1440))
+    );
+    // Changing scale rebuilds even when dimensions remain within bounds.
+    assert_eq!(
+        needs_chrome_rebuild(1, 1920, 1080, 2, 1920, 1080),
+        Some((2, 1920, 1080))
+    );
 }
