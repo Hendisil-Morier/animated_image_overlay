@@ -20,6 +20,7 @@ fn layout_clamps_scale_and_coordinates_within_monitor()
             x: 5000.0,
             y: -20.0,
             scale: 10.0,
+            rotation: Rotation::Deg0,
         },
     );
 
@@ -47,6 +48,7 @@ fn layout_drag_move_and_resize_preserve_top_left_and_bounds()
             x: 100.0,
             y: 120.0,
             scale: 1.0,
+            rotation: Rotation::Deg0,
         },
     );
 
@@ -74,6 +76,7 @@ fn layout_scroll_zoom_matches_exponential_factor()
             x: 50.0,
             y: 50.0,
             scale: 0.5,
+            rotation: Rotation::Deg0,
         },
     );
 
@@ -94,6 +97,7 @@ fn layout_computes_passive_handle_and_edit_input_regions()
             x: 100.0,
             y: 200.0,
             scale: 1.0,
+            rotation: Rotation::Deg0,
         },
     );
 
@@ -162,6 +166,7 @@ fn layout_rotate_swaps_bounds_preserves_center_and_uses_oriented_resize()
             x: 500.0,
             y: 400.0,
             scale: 1.0,
+            rotation: Rotation::Deg0,
         },
     );
 
@@ -194,6 +199,7 @@ fn layout_rotate_clamps_wide_overlay_against_screen_height()
             x: 0.0,
             y: 100.0,
             scale: 1.0,
+            rotation: Rotation::Deg0,
         },
     );
 
@@ -203,4 +209,31 @@ fn layout_rotate_clamps_wide_overlay_against_screen_height()
     let (w, h) = layout.overlay_size();
     assert!(w <= 1920 && h <= 1080);
     assert!(layout.state().x >= 0.0 && layout.state().y >= 0.0);
+}
+
+#[test]
+fn layout_restores_saved_rotation_on_startup_and_clamps_bounds()
+{
+    let layout = OverlayLayout::new(
+        1800,
+        600,
+        1920,
+        1080,
+        OverlayState {
+            x: 2000.0,
+            y: 200.0,
+            scale: 1.0,
+            rotation: Rotation::Deg270,
+        },
+    );
+
+    assert_eq!(layout.rotation(), Rotation::Deg270);
+    assert_eq!(layout.state().rotation, Rotation::Deg270);
+    assert_eq!(layout.oriented_frame_size(), (600, 1800));
+    let expected_scale = 1080.0 / 1800.0;
+    assert!((layout.state().scale - expected_scale).abs() < 1e-9);
+    let (w, h) = layout.overlay_size();
+    assert!(w <= 1920 && h <= 1080);
+    assert_eq!(layout.state().x, f64::from(1920 - w));
+    assert_eq!(layout.state().y, 0.0);
 }

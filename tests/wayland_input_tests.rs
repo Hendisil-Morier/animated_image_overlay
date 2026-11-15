@@ -28,6 +28,7 @@ fn sample_layout() -> OverlayLayout
             x: 200.0,
             y: 150.0,
             scale: 1.0,
+            rotation: Rotation::Deg0,
         },
     )
 }
@@ -250,7 +251,7 @@ fn rotate_shortcuts_work_only_in_edit_mode_and_ignore_repeats()
 
     let cw = input.on_key_press(Keysym::r, &mut layout);
     assert!(cw.layout_changed);
-    assert!(!cw.schedule_save);
+    assert!(cw.schedule_save);
     assert_eq!(layout.rotation(), Rotation::Deg90);
     assert_eq!(layout.overlay_size(), (300, 400));
 
@@ -260,7 +261,7 @@ fn rotate_shortcuts_work_only_in_edit_mode_and_ignore_repeats()
 
     let ccw = input.on_key_press(Keysym::R, &mut layout);
     assert!(ccw.layout_changed);
-    assert!(!ccw.schedule_save);
+    assert!(ccw.schedule_save);
     assert_eq!(layout.rotation(), Rotation::Deg0);
     assert_eq!(layout.overlay_size(), (400, 300));
 }

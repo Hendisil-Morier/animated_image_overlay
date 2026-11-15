@@ -1,4 +1,4 @@
-//! Persistent per-image overlay position and scale storage.
+//! Persistent per-image overlay position, scale, and rotation storage.
 //!
 //! Reads and updates `$XDG_CONFIG_HOME/apng-overlay.json` (or `~/.config/apng-overlay.json`)
 //! while preserving entries written by other image instances via an exclusive `flock` on
@@ -13,13 +13,14 @@ use std::{
 };
 
 // Serialization traits and dynamic map representation preserving foreign JSON keys.
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
-// Shared crash-safe atomic writer, XDG lookup helper, and project domain errors.
+// Shared crash-safe atomic writer, rotation enum, XDG lookup helper, and domain errors.
 use crate::{
     atomic_fs,
     error::{ConfigError, OverlayError},
+    layout::Rotation,
     xdg,
 };
 
@@ -35,7 +36,7 @@ pub const DEFAULT_POS_Y: f64 = 100.0;
 /// Default scale multiplier when an image has no valid saved entry.
 pub const DEFAULT_SCALE: f64 = 0.6;
 
-/// Persisted overlay placement and scale relative to stored base image dimensions.
+/// Persisted overlay placement, scale, and orientation relative to stored base dimensions.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct OverlayState
 {
@@ -47,17 +48,26 @@ pub struct OverlayState
 
     /// Display multiplier applied to the stored base frame dimensions.
     pub scale: f64,
+
+    /// Clockwise 90-degree orientation persisted as integer degrees (`0`, `90`, `180`, `270`).
+    #[serde(
+        default,
+        serialize_with = "serialize_rotation",
+        deserialize_with = "deserialize_rotation"
+    )]
+    pub rotation: Rotation,
 }
 
 impl Default for OverlayState
 {
-    /// Returns the baseline startup placement and scale matching Python defaults.
+    /// Returns the baseline startup placement, scale, and orientation matching defaults.
     fn default() -> Self
     {
         Self {
             x: DEFAULT_POS_X,
             y: DEFAULT_POS_Y,
             scale: DEFAULT_SCALE,
+            rotation: Rotation::default(),
         }
     }
 }
@@ -152,6 +162,11 @@ impl ConfigStore
             state.scale = scale;
         }
 
+        if let Some(rotation) = entry.get("rotation").and_then(extract_rotation)
+        {
+            state.rotation = rotation;
+        }
+
         state
     }
 
@@ -212,6 +227,7 @@ impl ConfigStore
             x = state.x,
             y = state.y,
             scale = state.scale,
+            rotation = state.rotation.degrees(),
             "Saved overlay state"
         );
         Ok(())
@@ -261,6 +277,30 @@ fn extract_finite_number(value: &Value) -> Option<f64>
         Value::Number(num) => num.as_f64().filter(|val| val.is_finite()),
         _ => None,
     }
+}
+
+/// Validates that a JSON value represents an exact clockwise quarter-turn (`0`, `90`, `180`, `270`).
+fn extract_rotation(value: &Value) -> Option<Rotation>
+{
+    value.as_u64().and_then(Rotation::from_degrees)
+}
+
+/// Serializes `Rotation` as integer clockwise degrees (`0`, `90`, `180`, or `270`).
+fn serialize_rotation<S>(rotation: &Rotation, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_u16(rotation.degrees())
+}
+
+/// Deserializes integer clockwise degrees (`0`, `90`, `180`, or `270`) into `Rotation`.
+fn deserialize_rotation<'de, D>(deserializer: D) -> Result<Rotation, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let degrees = u64::deserialize(deserializer)?;
+    Rotation::from_degrees(degrees)
+        .ok_or_else(|| serde::de::Error::custom("rotation must be 0, 90, 180, or 270 degrees"))
 }
 
 /// Collapses `.` and `..` components without dereferencing filesystem symlinks.

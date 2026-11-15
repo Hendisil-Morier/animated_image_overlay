@@ -78,6 +78,31 @@ impl Rotation
             Self::Deg90 | Self::Deg270 => (height, width),
         }
     }
+
+    /// Returns the clockwise quarter-turn angle in degrees (`0`, `90`, `180`, or `270`).
+    pub const fn degrees(self) -> u16
+    {
+        match self
+        {
+            Self::Deg0 => 0,
+            Self::Deg90 => 90,
+            Self::Deg180 => 180,
+            Self::Deg270 => 270,
+        }
+    }
+
+    /// Converts an exact clockwise quarter-turn degree value (`0`, `90`, `180`, or `270`).
+    pub const fn from_degrees(degrees: u64) -> Option<Self>
+    {
+        match degrees
+        {
+            0 => Some(Self::Deg0),
+            90 => Some(Self::Deg90),
+            180 => Some(Self::Deg180),
+            270 => Some(Self::Deg270),
+            _ => None,
+        }
+    }
 }
 
 /// Integer logical pixel rectangle aligned with Wayland surface-local input regions.
@@ -113,11 +138,8 @@ pub struct OverlayLayout
     // Active monitor height in logical pixels (minimum 1 px).
     screen_height: u32,
 
-    // Current position and scale subject to clamping.
+    // Current position, scale, and 90-degree orientation subject to clamping.
     state: OverlayState,
-
-    // Active 90-degree visual orientation relative to unrotated frame pixels.
-    rotation: Rotation,
 }
 
 impl OverlayLayout
@@ -137,7 +159,6 @@ impl OverlayLayout
             screen_width: screen_width.max(1),
             screen_height: screen_height.max(1),
             state,
-            rotation: Rotation::default(),
         };
         layout.clamp();
         layout
@@ -160,14 +181,15 @@ impl OverlayLayout
     /// Returns frame width and height swapped when rotated 90 or 270 degrees.
     pub fn oriented_frame_size(&self) -> (u32, u32)
     {
-        self.rotation
+        self.state
+            .rotation
             .orient_dimensions(self.frame_width, self.frame_height)
     }
 
     /// Returns the active 90-degree visual rotation.
     pub fn rotation(&self) -> Rotation
     {
-        self.rotation
+        self.state.rotation
     }
 
     /// Returns the active monitor logical dimensions in pixels.
@@ -253,7 +275,7 @@ impl OverlayLayout
         let cx = self.state.x + f64::from(old_w) * 0.5;
         let cy = self.state.y + f64::from(old_h) * 0.5;
 
-        self.rotation = self.rotation.rotated(direction);
+        self.state.rotation = self.state.rotation.rotated(direction);
         self.clamp();
 
         let (new_w, new_h) = self.overlay_size();

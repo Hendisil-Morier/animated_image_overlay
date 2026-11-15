@@ -15,6 +15,7 @@ use animated_image_widget::{
         config_path_from_env,
     },
     error::{ConfigError, OverlayError},
+    layout::Rotation,
 };
 use serde_json::{Map, Value};
 
@@ -69,6 +70,7 @@ fn config_recovers_valid_fields_and_ignores_corrupt_entries()
             x: 250.0,
             y: DEFAULT_POS_Y,
             scale: DEFAULT_SCALE,
+            rotation: Rotation::Deg0,
         }
     );
 
@@ -95,6 +97,7 @@ fn config_save_state_entry_serializes_concurrent_writes_via_flock()
                 x: f64::from(idx as u32) * 10.0,
                 y: f64::from(idx as u32) * 20.0,
                 scale: 0.5 + f64::from(idx as u32) * 0.1,
+                rotation: Rotation::Deg0,
             };
             store_ref
                 .save_state_entry(&key, state)
@@ -149,6 +152,7 @@ fn config_save_preserves_foreign_keys_and_reports_unwritable_dir()
                 x: DEFAULT_POS_X + 5.0,
                 y: DEFAULT_POS_Y,
                 scale: 0.9,
+                rotation: Rotation::Deg0,
             },
         )
         .expect("save should succeed");
@@ -203,4 +207,59 @@ fn config_path_honors_xdg_override_and_home_fallback()
         missing_both,
         Err(ConfigError::DirectoryUnavailable)
     ));
+}
+
+#[test]
+fn config_persists_quarter_turn_rotations_and_recovers_invalid_values()
+{
+    let temp = TempConfigDir::new("rotation_persistence");
+    let cfg_path = temp.path().join("apng-overlay.json");
+    let store = ConfigStore::new(&cfg_path);
+
+    for (key, rotation, expected_deg) in [
+        ("/deg0.png", Rotation::Deg0, 0),
+        ("/deg90.png", Rotation::Deg90, 90),
+        ("/deg180.png", Rotation::Deg180, 180),
+        ("/deg270.png", Rotation::Deg270, 270),
+    ]
+    {
+        let state = OverlayState {
+            x: 120.0,
+            y: 240.0,
+            scale: 0.75,
+            rotation,
+        };
+        store
+            .save_state_entry(key, state)
+            .expect("rotation entry should save");
+        assert_eq!(store.load_state_entry(key), state);
+
+        let raw = fs::read_to_string(&cfg_path).expect("saved config readable");
+        let parsed: Map<String, Value> = serde_json::from_str(&raw).expect("valid JSON object");
+        assert_eq!(parsed[key]["rotation"], Value::from(expected_deg));
+    }
+
+    let seed = r#"{
+        "/legacy.png": {"x": 300, "y": 400, "scale": 1.25},
+        "/non_quarter.png": {"x": 310, "y": 410, "scale": 1.5, "rotation": 45},
+        "/negative.png": {"x": 320, "y": 420, "scale": 0.8, "rotation": -90},
+        "/string_rot.png": {"x": 330, "y": 430, "scale": 0.9, "rotation": "90"}
+    }"#;
+    fs::write(&cfg_path, seed).expect("seed config written");
+
+    for (key, x) in [
+        ("/legacy.png", 300.0),
+        ("/non_quarter.png", 310.0),
+        ("/negative.png", 320.0),
+        ("/string_rot.png", 330.0),
+    ]
+    {
+        let loaded = store.load_state_entry(key);
+        assert_eq!(loaded.x, x);
+        assert_eq!(loaded.rotation, Rotation::Deg0);
+    }
+
+    let invalid_serde: Result<OverlayState, _> =
+        serde_json::from_str(r#"{"x":10,"y":20,"scale":1.0,"rotation":45}"#);
+    assert!(invalid_serde.is_err());
 }

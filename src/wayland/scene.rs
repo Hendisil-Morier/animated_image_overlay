@@ -228,7 +228,6 @@ impl OverlayScene
 
         self.frame_ring
             .upload_and_attach(&self.image_surface, frame0_argb)?;
-        self.image_surface.commit();
 
         self.sync_layout(compositor, shm, layout, input)?;
         Ok(())

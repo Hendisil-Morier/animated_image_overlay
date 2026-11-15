@@ -418,6 +418,7 @@ impl InputState
             {
                 layout.rotate(direction);
                 effects.layout_changed = true;
+                effects.schedule_save = true;
             }
             KeyShortcut::TogglePause =>
             {
