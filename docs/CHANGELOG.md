@@ -10,10 +10,20 @@ All notable changes to this project are documented here.
 - Added edit-mode `f` and `F` keyboard shortcuts (`FlipAxis`, `KeyShortcut::Flip`, and `Transform::Flipped*` via `wl_surface::set_buffer_transform`) to mirror the overlay horizontally or vertically using dihedral composition with `rotation`, persisted per image via `flipped` inside `apng-overlay.json`.
 
 ### Changed
-- Kept the faded `28x28` corner handle subtly visible (`~15%` opacity via `HANDLE_FADED_ALPHA = 38`) after the 2-second idle timeout instead of detaching invisibly so the grab target stays easy to spot.
+- Kept the faded `28x28` corner handle subtly visible (`~15%` opacity via `HANDLE_FADED_ALPHA = 38`) after the 2-second idle timeout so the grab target stays easy to spot while passive.
 - Generalized `OverlayState::rotation` and `OverlayLayout::rotation` from discrete quarter-turn variants to normalized finite `f64` degrees in `[0.0, 360.0)` while preserving zero-copy Wayland `wl_surface::set_buffer_transform` fast paths on snapped 90-degree multiples.
-- Resampled arbitrary-angle frames directly at physical display resolution via `decode::rotate_argb8888_into` (using 2-pixel `u64` SWAR interior scanlines) and cached them in `DisplayFrameCache` when fitting `-c display`, falling back to direct `ImageBufferRing::fill_and_attach` streaming for larger buffers.
-- Deferred SHM ring resizes during pointer resize drags until button release (`InputState::is_resizing`) while resyncing physical buffer density on compositor scale changes and downscaling oversized quarter-turn animations (`decode::resize_premultiplied_argb8888`) via `OverlayScene::needs_buffer_resync`.
+- Partitioned fractional rotation (`decode::rotate_argb8888_into`) per scanline using `linear_in_bounds` into unchecked interior spans (`write_interior_pixel_swar` with `12`-bit bilinear weights packed as dual `[B, R]` / `[G, A]` `u64` SWAR lanes) and `1 px` transparent apron tails (`write_apron_pixel`).
+- Cached display-resolution rotated and downscaled quarter-turn buffers lazily inside `DisplayFrameCache` (`-c display`, `64 MiB` default, normalized via `angle_key`), pairing canonical `(angle=0.0, flipped=false)` keys on oversized quarter turns (`!fits_source_ram`) with `wl_surface::set_buffer_transform` so all eight dihedral quarter-flip orientations share cached Lanczos3 downscales while oversized overlays (`!would_fit`) fall back to `.lraw` streaming (see [ADR-001](decisions/001-display-cache-and-resampling.md)).
+- Deferred SHM ring resizes during pointer resize drags until button release (`InputState::is_resizing`) while resyncing physical buffer density on compositor scale changes and shrinking hysteresis (`want_pixels * 3 <= cur_pixels * 2`) via `OverlayScene::needs_buffer_resync`.
+
+### Fixed
+- Separated alpha-premultiplication handling inside `decode::pixel::resize_u8x4` so `resize_premultiplied_argb8888` passes `ResizeOptions::use_alpha(false)` on premultiplied `ARGB8888` cache frames while `downscale_if_needed` retains `use_alpha(true)` for straight RGBA decode input, fixing double premultiplication on semi-transparent edges and dropping `Resizer::alpha_buffer` (`12.25 MB` steady `Pss_Anon` savings on `M_Animation.apng`).
+
+### Benchmark Comparison (`~/Pictures/M_Animation.apng -w 5000`, `1492x2158`, `180` frames, KDE KWin `eDP-1` `2x`)
+- **Pre-optimization Profiler Hotspots (PID `347530`, `310.0` deg, `scale=0.033`):** `32.4%` single-core CPU (`~2.0–2.5%` host across 16 cores, `26,212 kB` `Rss`), split across `73.62%` `cpu_core` / `74.28%` `cpu_atom` samples in `decompress_chunk_into` (`~390 MB/s` LZ4 page-cache reads) and `16.42%` in `rotate_argb8888_into`.
+- **Rotated Thumbnail (`310.0` deg, `scale=0.033`):** `-c display=0` (`SWAR` streaming) measures `17.66%` single-core (`1.10%` host, `26,108 kB` `Rss`, `19,140 kB` `Pss_Anon`, `192 kB` `Pss_Shmem`); default `-c display=64` drops CPU to `0.67%` single-core (`0.04%` host, `-48x` single-core CPU vs baseline) at `46,792 kB` `Rss` (`39,456 kB` `Pss_Anon`, `192 kB` `Pss_Shmem`).
+- **Quarter-Turn Thumbnail (`0.0` deg, `scale=0.033`):** `-c display=0` measures `19.33%` single-core (`1.21%` host, `51,124 kB` `Rss`, `19,144 kB` `Pss_Anon`, `12,656 kB` `Pss_Shmem`); default `-c display=64` downscales to physical overlay size and drops CPU to `0.67%` single-core (`0.04%` host, `56,908 kB` `Rss`, `49,244 kB` `Pss_Anon`, `238 kB` `Pss_Shmem`).
+- **Large Overlay Budget Guard (`scale=0.24`, exceeds `64 MiB` display cap):** Disables `DisplayFrameCache` cleanly and streams directly, keeping `Pss_Anon` at `19,116 kB` (`50,928 kB` `Rss` at `0.0` deg; `38,124 kB` `Rss` and `6,026 kB` `Pss_Shmem` at `310.0` deg).
 
 ## [0.2.2] - 2026-11-15
 

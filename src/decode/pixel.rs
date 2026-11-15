@@ -357,6 +357,9 @@ fn linear_in_bounds(start_fp: i64, step: i64, max_fp: i64, count: usize) -> (usi
 }
 
 /// Blends four strictly in-bounds `ARGB8888` neighbor pixels via packed `u64` two-channel SWAR lanes.
+///
+/// Packs `[B, R]` and `[G, A]` into bits `0..31` and `32..63` of `u64` accumulators because
+/// 12-bit weights cap each product sum below `0xFF80_0000 < 2^32`, eliminating cross-lane carry.
 #[inline]
 fn write_interior_pixel_swar(
     top: &[u8],
@@ -462,6 +465,8 @@ pub fn rotate_argb8888_into(
         let mut sx_fp = (row_sx0 * ROTATE_STEP_SCALE).round() as i64;
         let mut sy_fp = (row_sy0 * ROTATE_STEP_SCALE).round() as i64;
 
+        // Partition the output row into outer 1 px apron segments and one strictly interior span
+        // so interior SWAR pixels slice neighbor rows directly, eliding per-pixel bounds branches.
         let (xl, xr) = linear_in_bounds(sx_fp, step_x_du, max_x_fp, dst_len);
         let (yl, yr) = linear_in_bounds(sy_fp, step_x_dv, max_y_fp, dst_len);
         let in_start = xl.max(yl);

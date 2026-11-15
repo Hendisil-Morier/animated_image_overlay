@@ -62,8 +62,12 @@ Signals:
 ## Configuration, Cache, and Logs
 
 - `~/.config/apng-overlay.json`: Stores `x`, `y`, `scale`, `rotation` (degrees in `[0.0, 360.0)`, using zero-copy compositor transforms on exact 90-degree multiples and smooth bilinear CPU resampling at fractional angles), and `flipped` (`true` or `false`) per canonical absolute file path using 500 ms debounced writes guarded by an exclusive `flock` on `~/.config/apng-overlay.json.lock` and atomic temp-file replacement.
-- `~/.cache/apng-overlay/`: Stores `lz4_flex`-compressed premultiplied `ARGB8888` chunks (`.lraw`) and `.json` metadata written strictly after `.lraw`. Frame 0 displays immediately while remaining frames stream in the background. Active cache entries refresh timestamps on hits, entries older than 30 days (`.json`, `.raw`, `.zraw`, `.lraw`) are pruned automatically at startup, uncompressed source frames remain cached in RAM up to a `128 MiB` LRU budget (`-r` / `-c ram`), and rotated or downscaled display frames reuse a separate `64 MiB` cache (`-c display`) during steady playback.
+- `~/.cache/apng-overlay/`: Stores `lz4_flex`-compressed premultiplied `ARGB8888` chunks (`.lraw`) and `.json` metadata written strictly after `.lraw`. Frame 0 displays immediately while remaining frames stream in the background. Active cache entries refresh timestamps on hits, entries older than 30 days (`.json`, `.raw`, `.zraw`, `.lraw`) are pruned automatically at startup, and two independent RAM tiers control playback caching:
+  - Source LRU (`-r` / `-c ram`, default `128 MiB`): Keeps decoded full-frame buffers in RAM for zero-copy streaming when the entire unpacked loop fits budget, switching dynamically to positional `.lraw` disk chunk streaming on larger files.
+  - Display Cache (`-c display`, default `64 MiB`): Stores rendered fractional rotations and Lanczos3-downscaled oversized quarter-turn frames (`DisplayFrameCache` paired with compositor `set_buffer_transform`) at physical display resolution, dropping steady-state CPU from continuous LZ4 decompression (`~32%` core) to lightweight SHM `memcpy` (`< 1%` core) while bypassing caching cleanly on large overlays.
 - `~/.cache/apng-overlay/logs/`: Daily rotating log files (`apng-overlay.*.log`, retaining up to 7 files).
+
+Architecture notes and CPU/memory benchmarks are documented in [docs/decisions/001-display-cache-and-resampling.md](docs/decisions/001-display-cache-and-resampling.md), [docs/CHANGELOG.md](docs/CHANGELOG.md), and [docs/CODING_STYLE.md](docs/CODING_STYLE.md).
 
 ## Structure and Tests
 

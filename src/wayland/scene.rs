@@ -376,6 +376,9 @@ impl OverlayScene
                 (frame_w, frame_h),
             );
             let (frame_count, decode_done, fits_source_ram) = cache.cache_profile();
+            // Gate quarter-turn downscaling on both oversized sources and fit inside `-c display`:
+            // small animations stream faster via source LRU copy, while huge overlays offload scaling
+            // to compositor GPU sampling rather than burning CPU Lanczos3 per frame.
             if !fits_source_ram
                 && (scaled_w, scaled_h) != (frame_w, frame_h)
                 && self
