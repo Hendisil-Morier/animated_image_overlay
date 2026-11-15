@@ -1,7 +1,8 @@
 //! Synchronous frame-0 decoding and cancellable background animation worker streaming.
 
-// Atomic cancellation signals, channels, paths, and worker threads.
+// Atomic cancellation signals, channels, single-item iterators, paths, and worker threads.
 use std::{
+    iter,
     path::Path,
     sync::{
         Arc,
@@ -14,11 +15,12 @@ use std::{
 // Lanczos3 resizer instantiated per worker thread.
 use fast_image_resize::Resizer;
 
-// Codec open helpers, frame encoding helpers, and domain errors.
+// Single-open codec handles, frame encoding helpers, and domain errors.
 use super::{
     codecs::{
-        FrameIterator, SourceKind, decode_err, decode_single_frame_sync, decode_static_image,
-        detect_source_kind, io_err, open_apng_iter, open_gif_iter, with_webp_frames,
+        FrameIterator, OpenedSource, apng_decoder_iter, decode_err, decode_image_reader,
+        decode_single_frame_sync, decode_static_png, gif_reader_iter, io_err, open_source,
+        with_webp_reader_frames,
     },
     pixel::{
         DecodedFirstFrame, EncodedFrame, RawRgbaFrame, encode_first_frame, encode_subsequent_frame,
@@ -47,8 +49,8 @@ impl FrameDecoder
     /// Decodes frame 0 immediately and streams any remaining frames through `sink`.
     ///
     /// Static images and `--max-frames 1` launches complete synchronously (`worker == None`).
-    /// Multi-frame animations open the decoder on a dedicated worker thread, send frame 0
-    /// over a bounded channel, and stream remaining frames until completion or `cancel`.
+    /// Multi-frame animations reuse the single opened source handle on a dedicated worker thread,
+    /// send frame 0 over a bounded channel, and stream remaining frames until completion or `cancel`.
     pub fn open_stream<S: FrameStreamSink>(
         path: &Path,
         base_width: u32,
@@ -63,11 +65,11 @@ impl FrameDecoder
         }
 
         let target_width = base_width.max(1);
-        let source_kind = detect_source_kind(path)?;
+        let source = open_source(path)?;
 
-        if source_kind == SourceKind::Static || max_frames == 1
+        if source.is_static() || max_frames == 1
         {
-            let first = decode_single_frame_sync(path, source_kind, target_width)?;
+            let first = decode_single_frame_sync(path, source, target_width)?;
             let first_result = sink.on_first_frame(&first);
             sink.on_finish(cancel.load(Ordering::Acquire), first_result);
             return Ok((first, None));
@@ -81,7 +83,7 @@ impl FrameDecoder
             .spawn(move || {
                 run_worker_decoder(
                     &worker_path,
-                    source_kind,
+                    source,
                     target_width,
                     max_frames,
                     &cancel,
@@ -114,10 +116,10 @@ impl FrameDecoder
     }
 }
 
-/// Executes animated format decoding on the background thread and notifies caller + `sink`.
+/// Executes animated format decoding from the single opened handle on the background thread.
 fn run_worker_decoder(
     path: &Path,
-    kind: SourceKind,
+    source: OpenedSource,
     base_width: u32,
     max_frames: usize,
     cancel: &AtomicBool,
@@ -125,31 +127,47 @@ fn run_worker_decoder(
     sink: Box<dyn FrameStreamSink>,
 )
 {
-    match kind
+    match source
     {
-        SourceKind::Apng => stream_iter_result(
+        OpenedSource::Apng(png) => stream_iter_result(
             path,
-            open_apng_iter(path),
+            apng_decoder_iter(path, *png),
             base_width,
             max_frames,
             cancel,
             first_tx,
             sink,
         ),
-        SourceKind::Gif => stream_iter_result(
+        OpenedSource::Gif(reader) => stream_iter_result(
             path,
-            open_gif_iter(path),
+            gif_reader_iter(path, reader),
             base_width,
             max_frames,
             cancel,
             first_tx,
             sink,
         ),
-        SourceKind::Webp => run_webp_worker(path, base_width, max_frames, cancel, first_tx, sink),
-        SourceKind::Static =>
-        {
-            finish_static_worker(path, base_width, cancel, first_tx, sink);
-        }
+        OpenedSource::Webp(reader) => with_webp_reader_frames(path, reader, true, |opened| {
+            stream_iter_result(path, opened, base_width, max_frames, cancel, first_tx, sink);
+        }),
+        OpenedSource::StaticPng(png) => stream_iter_result(
+            path,
+            Ok(Box::new(iter::once(decode_static_png(path, *png)))),
+            base_width,
+            max_frames,
+            cancel,
+            first_tx,
+            sink,
+        ),
+        OpenedSource::Static(reader) => stream_iter_result(
+            path,
+            Ok(Box::new(iter::once(decode_image_reader(path, *reader)))),
+            base_width,
+            max_frames,
+            cancel,
+            first_tx,
+            sink,
+        ),
     }
 }
 
@@ -172,49 +190,6 @@ fn stream_iter_result<'a>(
         }
         Err(err) => abort_startup_error(err, cancel, first_tx, sink),
     }
-}
-
-/// Decodes a static single frame inside the background worker (used directly and as WebP fallback).
-fn finish_static_worker(
-    path: &Path,
-    base_width: u32,
-    cancel: &AtomicBool,
-    first_tx: &mpsc::SyncSender<Result<DecodedFirstFrame, CacheError>>,
-    mut sink: Box<dyn FrameStreamSink>,
-)
-{
-    match decode_static_image(path)
-        .and_then(|raw| encode_first_frame(raw, base_width, &mut Resizer::new()))
-    {
-        Ok(first) =>
-        {
-            let cache_res = sink.on_first_frame(&first);
-            let _ = first_tx.send(Ok(first));
-            sink.on_finish(cancel.load(Ordering::Acquire), cache_res);
-        }
-        Err(err) => abort_startup_error(err, cancel, first_tx, sink),
-    }
-}
-
-/// Decodes a WebP bitstream with `webp_animation`, falling back to `image` if 4K limit hits.
-fn run_webp_worker(
-    path: &Path,
-    base_width: u32,
-    max_frames: usize,
-    cancel: &AtomicBool,
-    first_tx: &mpsc::SyncSender<Result<DecodedFirstFrame, CacheError>>,
-    sink: Box<dyn FrameStreamSink>,
-)
-{
-    with_webp_frames(path, true, |opened| match opened
-    {
-        Ok(Some(iter)) =>
-        {
-            stream_iter_frames(path, iter, base_width, max_frames, cancel, first_tx, sink);
-        }
-        Ok(None) => finish_static_worker(path, base_width, cancel, first_tx, sink),
-        Err(err) => abort_startup_error(err, cancel, first_tx, sink),
-    });
 }
 
 /// Streams frame 0 and remaining frames uniformly across APNG, GIF, and WebP iterators.

@@ -1,9 +1,10 @@
-//! Image container format detection and codec frame iterators across APNG, GIF, WebP, and stills.
+//! Image container format detection and single-open codec iterators across APNG, GIF, WebP, and stills.
 
-// Filesystem readers for image containers.
+// Filesystem readers, in-memory cursors, stream reads, and explicit rewind seeks.
 use std::{
-    fs::{self, File},
-    io::BufReader,
+    fs::File,
+    io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom},
+    iter,
     path::Path,
 };
 
@@ -11,7 +12,7 @@ use std::{
 use fast_image_resize::Resizer;
 // Still and animated codecs (`APNG`, `GIF`, and fallback static readers).
 use image::{
-    AnimationDecoder, ImageFormat, ImageReader,
+    AnimationDecoder, DynamicImage, ImageFormat, ImageReader,
     codecs::{gif::GifDecoder, png::PngDecoder},
 };
 // Animated and static WebP decoding backed by `libwebp`.
@@ -21,28 +22,39 @@ use webp_animation::{ColorMode, Decoder as WebpDecoder, DecoderOptions as WebpOp
 use super::pixel::{DecodedFirstFrame, RawRgbaFrame, encode_first_frame};
 use crate::{error::CacheError, playback::PlaybackClock};
 
-/// Identified container decoder strategy for a validated source file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SourceKind
+/// Single opened image container reused across startup probing and frame decoding.
+pub(crate) enum OpenedSource
 {
-    /// PNG containing an `acTL` animation control chunk.
-    Apng,
+    /// PNG container verified to carry an `acTL` animation control chunk.
+    Apng(Box<PngDecoder<BufReader<File>>>),
 
-    /// Graphics Interchange Format animation or single frame.
-    Gif,
+    /// Static PNG already parsed past header chunks without an `acTL` sequence.
+    StaticPng(Box<PngDecoder<BufReader<File>>>),
 
-    /// Animated or still WebP bitstream.
-    Webp,
+    /// Graphics Interchange Format file reader positioned at byte offset 0.
+    Gif(BufReader<File>),
 
-    /// Single-frame image decoded directly by `image::ImageReader`.
-    Static,
+    /// WebP file reader positioned at byte offset 0.
+    Webp(BufReader<File>),
+
+    /// Static still image reader retaining its guessed format and buffered file handle.
+    Static(Box<ImageReader<BufReader<File>>>),
+}
+
+impl OpenedSource
+{
+    /// Returns `true` when the container guarantees a single static frame.
+    pub(crate) fn is_static(&self) -> bool
+    {
+        matches!(self, Self::StaticPng(_) | Self::Static(_))
+    }
 }
 
 /// Boxed iterator yielding decoded straight-RGBA frames and normalized delays.
 pub(crate) type FrameIterator<'a> = Box<dyn Iterator<Item = Result<RawRgbaFrame, CacheError>> + 'a>;
 
-/// Determines container format and whether PNG carries an APNG animation sequence.
-pub(crate) fn detect_source_kind(path: &Path) -> Result<SourceKind, CacheError>
+/// Opens `path` once, guesses its container format, and prepares a reusable source handle.
+pub(crate) fn open_source(path: &Path) -> Result<OpenedSource, CacheError>
 {
     let reader = open_guessed_reader(path)?;
 
@@ -50,38 +62,42 @@ pub(crate) fn detect_source_kind(path: &Path) -> Result<SourceKind, CacheError>
     {
         Some(ImageFormat::Png) =>
         {
-            let png = PngDecoder::new(open_buffered_file(path)?)
-                .map_err(|err| decode_err(path, err.to_string()))?;
+            let buf = rewind_reader(path, reader)?;
+            let png = PngDecoder::new(buf).map_err(|err| decode_err(path, err.to_string()))?;
 
             if png.is_apng().unwrap_or(false)
             {
-                Ok(SourceKind::Apng)
+                Ok(OpenedSource::Apng(Box::new(png)))
             }
             else
             {
-                Ok(SourceKind::Static)
+                Ok(OpenedSource::StaticPng(Box::new(png)))
             }
         }
-        Some(ImageFormat::Gif) => Ok(SourceKind::Gif),
-        Some(ImageFormat::WebP) => Ok(SourceKind::Webp),
-        _ => Ok(SourceKind::Static),
+        Some(ImageFormat::Gif) => Ok(OpenedSource::Gif(rewind_reader(path, reader)?)),
+        Some(ImageFormat::WebP) => Ok(OpenedSource::Webp(rewind_reader(path, reader)?)),
+        _ => Ok(OpenedSource::Static(Box::new(reader))),
     }
 }
 
 /// Synchronously decodes a single frame for static images or `--max-frames 1`.
 pub(crate) fn decode_single_frame_sync(
     path: &Path,
-    kind: SourceKind,
+    source: OpenedSource,
     base_width: u32,
 ) -> Result<DecodedFirstFrame, CacheError>
 {
     let mut resizer = Resizer::new();
-    let raw = match kind
+    let raw = match source
     {
-        SourceKind::Apng => open_apng_iter(path)?.next(),
-        SourceKind::Gif => open_gif_iter(path)?.next(),
-        SourceKind::Webp => Some(decode_first_webp_or_static(path)),
-        SourceKind::Static => Some(decode_static_image(path)),
+        OpenedSource::Apng(png) => apng_decoder_iter(path, *png)?.next(),
+        OpenedSource::Gif(reader) => gif_reader_iter(path, reader)?.next(),
+        OpenedSource::Webp(reader) =>
+        {
+            with_webp_reader_frames(path, reader, false, |opened| opened.map(|mut it| it.next()))?
+        }
+        OpenedSource::StaticPng(png) => Some(decode_static_png(path, *png)),
+        OpenedSource::Static(reader) => Some(decode_image_reader(path, *reader)),
     };
 
     let frame =
@@ -89,11 +105,12 @@ pub(crate) fn decode_single_frame_sync(
     encode_first_frame(frame, base_width, &mut resizer)
 }
 
-/// Opens a streaming APNG frame iterator yielding normalized `RawRgbaFrame` records.
-pub(crate) fn open_apng_iter<'a>(path: &'a Path) -> Result<FrameIterator<'a>, CacheError>
+/// Builds a streaming APNG frame iterator from an already-opened `PngDecoder`.
+pub(crate) fn apng_decoder_iter<'a>(
+    path: &'a Path,
+    png: PngDecoder<BufReader<File>>,
+) -> Result<FrameIterator<'a>, CacheError>
 {
-    let png = PngDecoder::new(open_buffered_file(path)?)
-        .map_err(|err| decode_err(path, err.to_string()))?;
     let apng = png
         .apng()
         .map_err(|err| decode_err(path, err.to_string()))?;
@@ -103,29 +120,32 @@ pub(crate) fn open_apng_iter<'a>(path: &'a Path) -> Result<FrameIterator<'a>, Ca
     ))
 }
 
-/// Opens a streaming GIF frame iterator yielding normalized `RawRgbaFrame` records.
-pub(crate) fn open_gif_iter<'a>(path: &'a Path) -> Result<FrameIterator<'a>, CacheError>
+/// Builds a streaming GIF frame iterator from an already-opened buffered reader.
+pub(crate) fn gif_reader_iter<'a>(
+    path: &'a Path,
+    reader: BufReader<File>,
+) -> Result<FrameIterator<'a>, CacheError>
 {
-    let gif = GifDecoder::new(open_buffered_file(path)?)
-        .map_err(|err| decode_err(path, err.to_string()))?;
+    let gif = GifDecoder::new(reader).map_err(|err| decode_err(path, err.to_string()))?;
 
     Ok(Box::new(
         gif.into_frames().map(|res| map_image_frame(path, res)),
     ))
 }
 
-/// Reads `path` and invokes `f` with a WebP frame iterator (`None` when libwebp rejects the bitstream).
-pub(crate) fn with_webp_frames<R>(
+/// Reads an opened WebP handle once and invokes `f` with a frame iterator, falling back on 4K stills.
+pub(crate) fn with_webp_reader_frames<R>(
     path: &Path,
+    mut reader: BufReader<File>,
     use_threads: bool,
-    f: impl FnOnce(Result<Option<FrameIterator<'_>>, CacheError>) -> R,
+    f: impl FnOnce(Result<FrameIterator<'_>, CacheError>) -> R,
 ) -> R
 {
-    let bytes = match fs::read(path)
+    let mut bytes = Vec::new();
+    if let Err(source) = reader.read_to_end(&mut bytes)
     {
-        Ok(data) => data,
-        Err(source) => return f(Err(io_err(path, source))),
-    };
+        return f(Err(io_err(path, source)));
+    }
 
     let options = WebpOptions {
         use_threads,
@@ -135,7 +155,15 @@ pub(crate) fn with_webp_frames<R>(
     let Ok(decoder) = WebpDecoder::new_with_options(&bytes, options)
     else
     {
-        return f(Ok(None));
+        let fallback = decode_image_reader(
+            path,
+            ImageReader::with_format(Cursor::new(&bytes), ImageFormat::WebP),
+        );
+        return match fallback
+        {
+            Ok(raw) => f(Ok(Box::new(iter::once(Ok(raw))))),
+            Err(err) => f(Err(err)),
+        };
     };
 
     let mut prev_timestamp = 0_i32;
@@ -152,48 +180,58 @@ pub(crate) fn with_webp_frames<R>(
         })
     });
 
-    f(Ok(Some(Box::new(iter))))
+    f(Ok(Box::new(iter)))
 }
 
-/// Decodes frame 0 of a WebP file, falling back to static reader on large canvases.
-pub(crate) fn decode_first_webp_or_static(path: &Path) -> Result<RawRgbaFrame, CacheError>
+/// Decodes an already-parsed static `PngDecoder` into a single straight-RGBA frame.
+pub(crate) fn decode_static_png(
+    path: &Path,
+    png: PngDecoder<BufReader<File>>,
+) -> Result<RawRgbaFrame, CacheError>
 {
-    if let Some(first) = with_webp_frames(path, false, |opened| {
-        opened.map(|opt| opt.and_then(|mut it| it.next()))
-    })?
-    {
-        return first;
-    }
-
-    decode_static_image(path)
+    let dyn_img =
+        DynamicImage::from_decoder(png).map_err(|err| decode_err(path, err.to_string()))?;
+    Ok(dynamic_image_into_raw(dyn_img))
 }
 
-/// Decodes a static image of any supported format into a single RGBA buffer.
-pub(crate) fn decode_static_image(path: &Path) -> Result<RawRgbaFrame, CacheError>
+/// Decodes a static image from an already-opened buffered `ImageReader`.
+pub(crate) fn decode_image_reader<R: BufRead + Seek>(
+    path: &Path,
+    reader: ImageReader<R>,
+) -> Result<RawRgbaFrame, CacheError>
 {
-    let dyn_img = open_guessed_reader(path)?
+    let dyn_img = reader
         .decode()
         .map_err(|err| decode_err(path, err.to_string()))?;
+    Ok(dynamic_image_into_raw(dyn_img))
+}
 
+/// Converts a decoded `DynamicImage` into tightly packed straight-RGBA pixels with static timing.
+fn dynamic_image_into_raw(dyn_img: DynamicImage) -> RawRgbaFrame
+{
     let rgba = dyn_img.into_rgba8();
     let (width, height) = rgba.dimensions();
-    Ok(RawRgbaFrame {
+    RawRgbaFrame {
         width,
         height,
         delay_ms: PlaybackClock::normalize_delay_ms(None),
         rgba: rgba.into_raw(),
-    })
+    }
 }
 
-/// Opens a buffered file handle mapping OS I/O failures uniformly to `CacheError::Io`.
-fn open_buffered_file(path: &Path) -> Result<BufReader<File>, CacheError>
+/// Rewinds an opened `ImageReader` handle back to byte offset 0 before constructing a codec decoder.
+fn rewind_reader(
+    path: &Path,
+    reader: ImageReader<BufReader<File>>,
+) -> Result<BufReader<File>, CacheError>
 {
-    File::open(path)
-        .map(BufReader::new)
-        .map_err(|source| io_err(path, source))
+    let mut buf = reader.into_inner();
+    buf.seek(SeekFrom::Start(0))
+        .map_err(|source| io_err(path, source))?;
+    Ok(buf)
 }
 
-/// Opens a buffered image reader with format guessing applied from file magic bytes.
+/// Opens a buffered image reader once with format guessing applied from magic bytes and path extension.
 fn open_guessed_reader(path: &Path) -> Result<ImageReader<BufReader<File>>, CacheError>
 {
     ImageReader::open(path)
