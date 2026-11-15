@@ -1,7 +1,12 @@
 //! Integration tests verifying display-resolution frame cache budgets and invalidation.
 
-use animated_image_widget::wayland::display_cache::{
-    DisplayCacheKey, DisplayFrameCache, angle_key,
+use animated_image_widget::{
+    config::OverlayState,
+    layout::OverlayLayout,
+    wayland::{
+        display_cache::{DisplayCacheKey, DisplayFrameCache, angle_key},
+        frame_stage::{BufferTargetSpec, compute_buffer_target_spec},
+    },
 };
 
 fn make_key(width: u32, height: u32, angle: f64, flipped: bool) -> DisplayCacheKey
@@ -63,4 +68,102 @@ fn display_cache_enforces_budgets_streaming_state_and_invalidation()
     assert!(!cache.sync(make_key(10, 10, 315.0, false), 5, true));
     assert!(!cache.is_active());
     assert_eq!(cache.cached_bytes(), 0);
+}
+
+#[test]
+fn compute_buffer_target_spec_selects_static_downscale_and_adr001_tiers()
+{
+    let display_cache = DisplayFrameCache::new(64 * 1024 * 1024);
+
+    // 1. Static single-frame thumbnail at quarter turn downscales cleanly with zero cache key.
+    let static_state = OverlayState {
+        x: 0.0,
+        y: 0.0,
+        scale: 0.25,
+        rotation: 90.0,
+        flipped: true,
+    };
+    let static_layout = OverlayLayout::new(2000, 1000, 1920, 1080, static_state);
+    assert_eq!(static_layout.overlay_size(), (250, 500));
+    assert_eq!(
+        compute_buffer_target_spec(&static_layout, &display_cache, 1, 1, true, true),
+        BufferTargetSpec {
+            width: 500,
+            height: 250,
+            cache_key: None,
+        }
+    );
+    assert_eq!(
+        compute_buffer_target_spec(&static_layout, &display_cache, 2, 1, true, true),
+        BufferTargetSpec {
+            width: 1000,
+            height: 500,
+            cache_key: None,
+        }
+    );
+
+    // 2. Streaming incomplete animation (`decode_done = false`) stays at raw source dimensions.
+    assert_eq!(
+        compute_buffer_target_spec(&static_layout, &display_cache, 1, 1, false, true),
+        BufferTargetSpec {
+            width: 2000,
+            height: 1000,
+            cache_key: None,
+        }
+    );
+
+    // 3. Small multi-frame loop (`fits_source_ram = true`) streams raw source frames zero-copy.
+    assert_eq!(
+        compute_buffer_target_spec(&static_layout, &display_cache, 1, 12, true, true),
+        BufferTargetSpec {
+            width: 2000,
+            height: 1000,
+            cache_key: None,
+        }
+    );
+
+    // 4. Oversized multi-frame loop fitting `-c display` uses canonical `(0 deg, false)` cache key.
+    assert_eq!(
+        compute_buffer_target_spec(&static_layout, &display_cache, 1, 12, true, false),
+        BufferTargetSpec {
+            width: 500,
+            height: 250,
+            cache_key: Some(make_key(500, 250, 0.0, false)),
+        }
+    );
+
+    // When `-c display` cannot hold all downscaled frames, fall back to source frame streaming.
+    let tiny_cache = DisplayFrameCache::new(512 * 1024);
+    assert_eq!(
+        compute_buffer_target_spec(&static_layout, &tiny_cache, 1, 12, true, false),
+        BufferTargetSpec {
+            width: 2000,
+            height: 1000,
+            cache_key: None,
+        }
+    );
+
+    // 5. Fractional rotation targets display-sized rotated dimensions with oriented cache key.
+    let rotated_layout = OverlayLayout::new(
+        1000,
+        1000,
+        1920,
+        1080,
+        OverlayState {
+            x: 0.0,
+            y: 0.0,
+            scale: 0.25,
+            rotation: 45.0,
+            flipped: true,
+        },
+    );
+    let expected_side = rotated_layout.overlay_size().0;
+    assert_eq!(
+        compute_buffer_target_spec(&rotated_layout, &display_cache, 1, 1, true, true),
+        BufferTargetSpec {
+            width: expected_side,
+            height: expected_side,
+            cache_key: Some(make_key(expected_side, expected_side, 45.0, true)),
+        }
+    );
 }

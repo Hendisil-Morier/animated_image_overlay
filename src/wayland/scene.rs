@@ -141,8 +141,8 @@ impl OverlayScene
         shm: &Shm,
         output: &WlOutput,
         monitor: &MonitorDescriptor,
-        frame_width: u32,
-        frame_height: u32,
+        layout: &OverlayLayout,
+        cache_profile: (usize, bool, bool),
         display_cache_budget_bytes: usize,
     ) -> Result<Self, OverlayError>
     where
@@ -194,8 +194,13 @@ impl OverlayScene
             sh as i32,
         )?;
 
-        let frame_stage =
-            FrameStage::new(shm, frame_width, frame_height, display_cache_budget_bytes)?;
+        let frame_stage = FrameStage::new(
+            shm,
+            layout,
+            cache_profile,
+            chrome.scale(),
+            display_cache_budget_bytes,
+        )?;
 
         Ok(Self {
             parent_layer,
@@ -222,6 +227,7 @@ impl OverlayScene
         shm: &Shm,
         layout: &OverlayLayout,
         input: &InputState,
+        cache_profile: (usize, bool, bool),
         frame0_argb: &[u8],
     ) -> Result<(), OverlayError>
     {
@@ -235,11 +241,13 @@ impl OverlayScene
         self.parent_layer.wl_surface().damage_buffer(0, 0, 1, 1);
         self.parent_viewport.set_destination(sw as i32, sh as i32);
 
-        let _retired_ring = self.frame_stage.stage_oriented_buffer(
+        let _retired_ring = self.frame_stage.stage_frame_slice(
             shm,
             &self.image_surface,
             layout,
             self.chrome.scale(),
+            cache_profile,
+            0,
             frame0_argb,
         )?;
         self.sync_layout_inner(compositor, shm, layout, input, true)?;

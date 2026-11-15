@@ -165,6 +165,7 @@ impl LayerShellHandler for OverlayRuntime
         if !self.configured
         {
             self.configured = true;
+            let cache_profile = self.cache.cache_profile();
             if let Some(scene) = &mut self.scene
                 && let Ok(Err(err)) = self.cache.with_frame_argb(0, |frame0| {
                     scene.initialize_first_frame(
@@ -172,6 +173,7 @@ impl LayerShellHandler for OverlayRuntime
                         &self.shm,
                         &self.layout,
                         &self.input,
+                        cache_profile,
                         frame0,
                     )
                 })

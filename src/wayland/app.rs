@@ -152,8 +152,8 @@ pub fn run_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayE
         &runtime.shm,
         &target_output,
         &target_desc,
-        frame_w,
-        frame_h,
+        &runtime.layout,
+        runtime.cache.cache_profile(),
         startup.display_budget_bytes,
     )?;
     runtime.scene = Some(scene);
