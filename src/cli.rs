@@ -199,7 +199,9 @@ impl CliArgs
     /// Resolves `-c` / `--cap` (`ram=<MB>,display=<MB>`) entries onto `ram_cache_mb` and `display_cache_mb`.
     fn apply_cap_overrides(&mut self) -> Result<(), OverlayError>
     {
-        self.display_cache_mb = DEFAULT_DISPLAY_CACHE_MB;
+        let mut ram_mb = self.ram_cache_mb;
+        let mut display_mb = DEFAULT_DISPLAY_CACHE_MB;
+
         for spec in &self.cap
         {
             if spec.trim().is_empty()
@@ -210,33 +212,16 @@ impl CliArgs
             }
             for item in spec.split(',')
             {
-                let item = item.trim();
-                let Some((key, val)) = item.split_once('=')
-                else
+                match parse_cap_entry(item)?
                 {
-                    return Err(OverlayError::CliValidation(format!(
-                        "Invalid --cap entry '{item}' (expected ram=<MB> or display=<MB>)"
-                    )));
-                };
-                let key = key.trim();
-                let mb = val.trim().parse::<usize>().map_err(|_| {
-                    OverlayError::CliValidation(format!(
-                        "Invalid --cap MiB count '{val}' for '{key}'"
-                    ))
-                })?;
-                match key
-                {
-                    "ram" => self.ram_cache_mb = mb,
-                    "display" => self.display_cache_mb = mb,
-                    _ =>
-                    {
-                        return Err(OverlayError::CliValidation(format!(
-                            "Unknown --cap key '{key}' (expected ram or display)"
-                        )));
-                    }
+                    (CapTarget::Ram, mb) => ram_mb = mb,
+                    (CapTarget::Display, mb) => display_mb = mb,
                 }
             }
         }
+
+        self.ram_cache_mb = ram_mb;
+        self.display_cache_mb = display_mb;
         Ok(())
     }
 
@@ -300,5 +285,42 @@ impl CliArgs
         }
 
         Ok(())
+    }
+}
+
+/// Target cache tier parsed from one `-c` / `--cap` `key=value` suboption.
+enum CapTarget
+{
+    // Uncompressed source RAM LRU budget (`-c ram=<MB>`).
+    Ram,
+
+    // Display-resolution frame cache budget (`-c display=<MB>`).
+    Display,
+}
+
+/// Parses one `ram=<MB>` or `display=<MB>` entry cleanly with contextual validation errors.
+fn parse_cap_entry(entry: &str) -> Result<(CapTarget, usize), OverlayError>
+{
+    let item = entry.trim();
+    let Some((key, val)) = item.split_once('=')
+    else
+    {
+        return Err(OverlayError::CliValidation(format!(
+            "Invalid --cap entry '{item}' (expected ram=<MB> or display=<MB>)"
+        )));
+    };
+
+    let key = key.trim();
+    let mb = val.trim().parse::<usize>().map_err(|_| {
+        OverlayError::CliValidation(format!("Invalid --cap MiB count '{val}' for '{key}'"))
+    })?;
+
+    match key
+    {
+        "ram" => Ok((CapTarget::Ram, mb)),
+        "display" => Ok((CapTarget::Display, mb)),
+        _ => Err(OverlayError::CliValidation(format!(
+            "Unknown --cap key '{key}' (expected ram or display)"
+        ))),
     }
 }
