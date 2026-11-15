@@ -18,8 +18,12 @@ use smithay_client_toolkit::{
 };
 // Raw Wayland protocol surface, subsurface, output, and viewport objects.
 use wayland_client::{
-    Dispatch, QueueHandle,
-    protocol::{wl_output::WlOutput, wl_subsurface::WlSubsurface, wl_surface::WlSurface},
+    Dispatch, Proxy, QueueHandle,
+    protocol::{
+        wl_output::{Transform, WlOutput},
+        wl_subsurface::WlSubsurface,
+        wl_surface::WlSurface,
+    },
 };
 use wayland_protocols::wp::viewporter::client::{
     wp_viewport::WpViewport, wp_viewporter::WpViewporter,
@@ -34,11 +38,26 @@ use super::{
 };
 use crate::{
     error::{OverlayError, WaylandError},
-    layout::OverlayLayout,
+    layout::{OverlayLayout, Rotation},
 };
 
 // Dedicated 4 KiB pool capacity backing the 1x1 transparent parent layer buffer.
 const PARENT_POOL_BYTES: usize = 4096;
+
+/// Maps clockwise overlay [`Rotation`] onto Wayland `wl_surface::set_buffer_transform`.
+///
+/// Wayland compositors display the inverse of the surface buffer transform, so reporting a
+/// 90-degree counter-clockwise buffer (`Transform::_90`) renders rotated 90 degrees clockwise.
+pub fn wl_transform_for_rotation(rotation: Rotation) -> Transform
+{
+    match rotation
+    {
+        Rotation::Deg0 => Transform::Normal,
+        Rotation::Deg90 => Transform::_90,
+        Rotation::Deg180 => Transform::_180,
+        Rotation::Deg270 => Transform::_270,
+    }
+}
 
 /// Creates a desynchronized child subsurface with empty click-through input region.
 pub(crate) fn create_desync_passive_subsurface<D>(
@@ -94,6 +113,12 @@ pub(crate) struct OverlayScene
 
     // Cached last committed edit mode to avoid redundant `set_keyboard_interactivity` commits.
     last_editing: bool,
+
+    // Cached last committed rotation applied to `image_surface`.
+    last_rotation: Rotation,
+
+    // Cached last committed `wp_viewport` destination size on `image_surface`.
+    last_image_dest: (i32, i32),
 }
 
 impl OverlayScene
@@ -176,6 +201,8 @@ impl OverlayScene
             screen_width: sw,
             screen_height: sh,
             last_editing: false,
+            last_rotation: Rotation::default(),
+            last_image_dest: (0, 0),
         })
     }
 
@@ -268,8 +295,46 @@ impl OverlayScene
 
         let rect = layout.overlay_rect();
         self.image_subsurface.set_position(rect.x, rect.y);
-        self.image_viewport
-            .set_destination(rect.width as i32, rect.height as i32);
+
+        let dst_w = rect.width as i32;
+        let dst_h = rect.height as i32;
+        let mut image_state_changed = false;
+
+        if (dst_w, dst_h) != self.last_image_dest
+        {
+            self.last_image_dest = (dst_w, dst_h);
+            self.image_viewport.set_destination(dst_w, dst_h);
+            image_state_changed = true;
+        }
+
+        let desired_rotation = layout.rotation();
+        if desired_rotation != self.last_rotation
+        {
+            self.last_rotation = desired_rotation;
+            if self.image_surface.version() >= 2
+            {
+                let transform = wl_transform_for_rotation(desired_rotation);
+                self.image_surface.set_buffer_transform(transform);
+                tracing::debug!(
+                    ?desired_rotation,
+                    ?transform,
+                    "Updated overlay buffer transform"
+                );
+            }
+            else
+            {
+                tracing::warn!(
+                    version = self.image_surface.version(),
+                    "wl_surface version < 2 lacks buffer_transform support"
+                );
+            }
+            image_state_changed = true;
+        }
+
+        if image_state_changed
+        {
+            self.image_surface.commit();
+        }
 
         let handle_rect = layout.input_rect(false);
         self.chrome

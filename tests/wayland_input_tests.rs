@@ -8,13 +8,14 @@ use animated_image_widget::{
         ClickTracker, InputState, KeyShortcut, MonitorDescriptor, PointerCursor,
         TRIPLE_CLICK_WINDOW_MS,
         chrome::{ChromeGeometry, needs_chrome_rebuild},
-        map_edit_keysym, resolve_monitor_index,
+        map_edit_keysym, resolve_monitor_index, wl_transform_for_rotation,
     },
 };
 use smithay_client_toolkit::seat::{
     keyboard::Keysym,
     pointer::{AxisScroll, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT},
 };
+use wayland_client::protocol::wl_output::Transform;
 
 fn sample_layout() -> OverlayLayout
 {
@@ -455,4 +456,13 @@ fn chrome_geometry_and_rebuild_policy_scale_hidpi_and_monitor_growth()
         needs_chrome_rebuild(1, 1920, 1080, 2, 1920, 1080),
         Some((2, 1920, 1080))
     );
+}
+
+#[test]
+fn rotation_maps_to_expected_wayland_buffer_transforms()
+{
+    assert_eq!(wl_transform_for_rotation(Rotation::Deg0), Transform::Normal);
+    assert_eq!(wl_transform_for_rotation(Rotation::Deg90), Transform::_90);
+    assert_eq!(wl_transform_for_rotation(Rotation::Deg180), Transform::_180);
+    assert_eq!(wl_transform_for_rotation(Rotation::Deg270), Transform::_270);
 }
