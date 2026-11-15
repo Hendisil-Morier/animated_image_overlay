@@ -5,7 +5,11 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Added edit-mode `[` and `]` repeatable shortcuts (`+/-5` degrees) and `0` reset shortcut (`KeyShortcut::Rotate`, `KeyShortcut::ResetRotation`) alongside bilinear premultiplied `ARGB8888` CPU rotation with a `1 px` transparent apron (`decode::rotate_argb8888_into`) and dynamic `ImageBufferRing` resizing for arbitrary angles.
 - Added edit-mode `f` and `F` keyboard shortcuts (`FlipAxis`, `KeyShortcut::Flip`, and `Transform::Flipped*` via `wl_surface::set_buffer_transform`) to mirror the overlay horizontally or vertically using dihedral composition with `rotation`, persisted per image via `flipped` inside `apng-overlay.json`.
+
+### Changed
+- Generalized `OverlayState::rotation` and `OverlayLayout::rotation` from discrete quarter-turn variants to normalized finite `f64` degrees in `[0.0, 360.0)` while preserving zero-copy Wayland `wl_surface::set_buffer_transform` fast paths on snapped 90-degree multiples.
 
 ## [0.2.2] - 2026-11-15
 
