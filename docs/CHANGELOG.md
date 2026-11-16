@@ -2,10 +2,16 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.4.0] - 2026-11-16
 
 ### Added
 
+- Direct playback support for video containers (`MP4`, `MOV`, `WebM`, `MKV`, `AVI`) via `ffprobe` metadata probing and `ffmpeg` PAM `P7` RGBA stream piping with `showinfo` microsecond PTS parsing (`src/decode/video/`).
+- In-process audio subsystem powered by `cpal 0.18` (`src/audio/`), featuring 48 kHz stereo `f32le` PCM decoding via `ffmpeg`, `PcmRing` lock-free buffering, click-free linear slew rate volume transitions (`SLEW_RAMP_SAMPLES = 256`), and A/V coupled loop clock synchronization (`CoupledLoop`).
+- Companion audio track playback via `--audio <FILE>` (`MP3`, `OGG`, `WAV`, `FLAC`, `AAC`, etc.) paired with animations or static images in `IndependentAudioLoop` mode.
+- Interactive edit-mode audio controls (`m` for mute toggle, `,` and `.` for 5% volume steps) and `--mute` / `--volume <LEVEL>` CLI flags.
+- Audio preferences (`AudioPrefs { volume, muted }`) persisted under an `audio` object in `$XDG_CONFIG_HOME/apng-overlay.json`.
+- Hybrid video caching architecture (`BackingStore`): short video loops (`<= 1800` frames and uncompressed bytes within `-c video=<MB>`, defaulting to 512 MiB) cache to `.lraw` disk storage for zero-CPU looping, while longer videos stream through `LiveVideoRing` maintaining a 16-frame bounded lookahead.
 - Added 1-second interval process CPU (`cpu=...%`, `host=...%` via `CLOCK_PROCESS_CPUTIME_ID`) and overall process RAM (`ram=...MiB` via `/proc/self/status` `VmRSS`) telemetry to `--stats` (`OverlayStats` and `StatsSnapshot` in `src/wayland/stats.rs`), and removed redundant `frame` cursor and post-decode `decode=done/warm` tags so `--stats` focuses on performance metrics.
 
 ### Performance
@@ -18,6 +24,7 @@ All notable changes to this project are documented here.
 
 ### Documentation
 
+- Added [ADR-004](decisions/004-mp4-video-and-audio-pipeline.md) capturing MP4 video decoding, lookahead streaming, and in-process audio architecture.
 - Added [ADR-002](decisions/002-microsecond-timing-and-compositor-sync.md) and [ADR-003](decisions/003-parallel-apng-decode-pipeline.md) capturing microsecond timing, compositor subsurface synchronization, `--stats` telemetry, and bounded dual-stage parallel APNG decoding decisions, and linked them from `README.md` and `docs/ARCHITECTURE.md`.
 
 ## [0.3.2] - 2026-11-16
