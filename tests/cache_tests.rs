@@ -5,11 +5,15 @@ use std::{
     ffi::OsStr,
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use animated_image_widget::{
-    cache::{FrameCache, cache_dir_from_env, compute_cache_paths, prune_cache},
+    cache::{FrameCache, WakeupCallback, cache_dir_from_env, compute_cache_paths, prune_cache},
     error::CacheError,
 };
 use image::{
@@ -372,4 +376,39 @@ fn cache_with_delays_borrows_timing_slice_without_blocking_subsequent_frame_read
     let warm_delays = warm.with_delays_us(|d, _| d.to_vec());
     assert_eq!(warm_delays, delays_us);
     warm.stop();
+}
+
+#[test]
+fn cache_flushes_early_startup_frames_before_steady_batching_and_commits_cleanly()
+{
+    let temp = TempCacheTestDir::new("early_wakeup");
+    let img_path = temp.path().join("anim12.gif");
+    let cache_dir = temp.path().join("cache");
+    create_animated_gif(&img_path, 12, 12, 12);
+
+    let wakeups = Arc::new(AtomicUsize::new(0));
+    let wakeups_cb = Arc::clone(&wakeups);
+    let cb: WakeupCallback = Arc::new(move || {
+        wakeups_cb.fetch_add(1, Ordering::Relaxed);
+    });
+
+    let mut store =
+        FrameCache::open_in_dir(&img_path, 500, 0, &cache_dir, 1024 * 1024, 30, Some(cb))
+            .expect("cold decode should succeed");
+    while !store.is_decode_done()
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    assert_eq!(store.frame_count(), 12);
+    // Frames 1..=7 flush immediately (7 wakeups) before DECODE_BATCH_SIZE=4 kicks in + finish.
+    assert!(wakeups.load(Ordering::Relaxed) >= 8);
+
+    for idx in 0..12_usize
+    {
+        let frame = store.frame_argb(idx).expect("cached frame decodes cleanly");
+        assert_eq!(frame.len(), 12 * 12 * 4);
+        assert_eq!(&frame[0..4], &[200, 120, (idx * 20) as u8, 255]);
+    }
+    store.stop();
 }

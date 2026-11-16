@@ -19,8 +19,11 @@ use crate::{
     error::CacheError,
 };
 
-// Batch threshold for flushing freshly decoded frames into shared state.
+// Steady-state batch threshold for flushing freshly decoded frames into shared state.
 const DECODE_BATCH_SIZE: usize = 4;
+
+// Startup frame count flushed one-by-one so early playback avoids waiting behind 4-frame batches.
+const EARLY_WAKEUP_FRAMES: usize = 8;
 
 /// Streaming sink bridging `FrameDecoder` output into `SharedFrames` and `.lraw`/`.json` storage.
 pub(crate) struct DecodeCacheSink
@@ -160,7 +163,15 @@ impl FrameStreamSink for DecodeCacheSink
         self.all_sizes.push(frame.lz4_payload.len());
         self.pending_batch.push((frame.lz4_payload, frame.delay_us));
 
-        if self.pending_batch.len() >= DECODE_BATCH_SIZE
+        let batch_threshold = if self.all_sizes.len() <= EARLY_WAKEUP_FRAMES
+        {
+            1
+        }
+        else
+        {
+            DECODE_BATCH_SIZE
+        };
+        if self.pending_batch.len() >= batch_threshold
             && let Some(shared) = &self.shared
         {
             append_batch(shared, &mut self.pending_batch, false, self.wakeup.as_ref());
