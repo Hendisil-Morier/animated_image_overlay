@@ -1,42 +1,23 @@
-//! Bounded, order-preserving parallel decode and encode pipelines for multi-frame animations.
+//! Synchronized pipeline queues, backpressure limits, and cancellation state.
 
-// Ordered frame staging, FIFO work queues, synchronization, paths, and worker scoping.
+// Ordered frame staging, FIFO work queues, synchronization, paths, and atomic cancellation.
 use std::{
     collections::{BTreeMap, VecDeque},
-    num::NonZeroUsize,
     path::Path,
     sync::{
         Condvar, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
-    thread,
 };
 
-// Lanczos3 resizer instance owned exclusively per encode worker thread.
-use fast_image_resize::Resizer;
-
-// APNG chunk splitter/compositor, frame payload records, encoder helper, sink trait, and errors.
-use super::{
-    apng::{
-        ApngCompositor, ApngHeader, ApngPacketReader, DecodedApngPatch, RawApngPacket,
-        decode_apng_packet,
+// APNG patch/packet records and frame pixel types managed across worker stages.
+use crate::{
+    decode::{
+        apng::{DecodedApngPatch, RawApngPacket},
+        pixel::{EncodedFrame, RawRgbaFrame},
     },
-    pixel::{EncodedFrame, RawRgbaFrame, encode_subsequent_frame},
-    stream::FrameStreamSink,
+    error::CacheError,
 };
-use crate::error::CacheError;
-
-// Minimum parallel encode worker count even on low-core CPUs.
-const MIN_ENCODE_WORKERS: usize = 1;
-
-// Upper worker cap avoiding allocator contention and preserving UI/compositor CPU headroom.
-const MAX_ENCODE_WORKERS: usize = 6;
-
-// Number of CPU threads reserved for sequential container decode, Wayland UI, and compositor work.
-const RESERVED_PIPELINE_THREADS: usize = 2;
-
-// Log progress batch interval matching legacy single-threaded decoder cadence.
-const PROGRESS_LOG_INTERVAL: usize = 30;
 
 /// Configuration borrowed by the scoped encode pipeline for frames `1..`.
 pub(crate) struct PipelineParams<'a>
@@ -95,7 +76,7 @@ struct PipelineState
 }
 
 /// Unit of parallel work claimed by a pool worker (`Encode` takes priority over `DecodeApng`).
-enum WorkerJob
+pub(super) enum WorkerJob
 {
     // Resize, premultiply, and LZ4-compress one composited full-canvas frame.
     Encode(usize, RawRgbaFrame),
@@ -105,7 +86,7 @@ enum WorkerJob
 }
 
 /// Next action returned to the sequential APNG compositor after inspecting shared state.
-enum PatchNext
+pub(super) enum PatchNext
 {
     // Next sequential inflated APNG patch ready for `ApngCompositor::apply_patch`.
     Patch(DecodedApngPatch),
@@ -118,7 +99,7 @@ enum PatchNext
 }
 
 /// Next action returned to the ordered sink consumer after inspecting shared state.
-enum SinkNext
+pub(super) enum SinkNext
 {
     // Next sequential encoded frame ready for `FrameStreamSink::on_frame`.
     Frame(EncodedFrame),
@@ -130,21 +111,8 @@ enum SinkNext
     Stopped(Option<CacheError>),
 }
 
-/// Ordered sink consumer result returned cleanly across `thread::scope` boundaries.
-struct SinkOutcome
-{
-    // Sink instance returned so `on_finish` runs after all scoped workers exit.
-    sink: Box<dyn FrameStreamSink>,
-
-    // Snapshot of cooperative cancellation flag when sink loop stopped.
-    cancelled: bool,
-
-    // Terminal decode, encode, or sink error status delivered to `on_finish`.
-    result: Result<(), CacheError>,
-}
-
 /// Coordinates bounded in-flight queueing, lock discipline, and clean early abort signaling.
-struct PipelineCoordinator
+pub(super) struct PipelineCoordinator
 {
     // Mutex guarding packet/patch/raw/encoded queues, sequence cursors, and termination flags.
     state: Mutex<PipelineState>,
@@ -171,7 +139,7 @@ struct PipelineCoordinator
 impl PipelineCoordinator
 {
     /// Creates a pipeline coordinator allowing up to `max_in_flight` buffered frames per queue.
-    fn new(max_in_flight: usize, apng_mode: bool) -> Self
+    pub(super) fn new(max_in_flight: usize, apng_mode: bool) -> Self
     {
         Self {
             state: Mutex::new(PipelineState {
@@ -231,7 +199,7 @@ impl PipelineCoordinator
     }
 
     /// Records the first error if unset, aborts remaining work, and wakes every stage.
-    fn fail(&self, err: CacheError)
+    pub(super) fn fail(&self, err: CacheError)
     {
         {
             let mut guard = self.lock();
@@ -245,7 +213,7 @@ impl PipelineCoordinator
     }
 
     /// Marks the pipeline aborted (e.g. external cancel) and wakes every waiting thread.
-    fn abort(&self)
+    pub(super) fn abort(&self)
     {
         {
             let mut guard = self.lock();
@@ -255,13 +223,13 @@ impl PipelineCoordinator
     }
 
     /// Reports whether any stage has aborted processing.
-    fn is_aborted(&self) -> bool
+    pub(super) fn is_aborted(&self) -> bool
     {
         self.lock().aborted
     }
 
     /// Marks sequential APNG packet splitting complete and wakes compositor and pool workers.
-    fn finish_packet_reader(&self)
+    pub(super) fn finish_packet_reader(&self)
     {
         {
             let mut guard = self.lock();
@@ -272,7 +240,7 @@ impl PipelineCoordinator
     }
 
     /// Marks sequential container reading or APNG compositing complete and wakes workers and sink.
-    fn finish_reader(&self)
+    pub(super) fn finish_reader(&self)
     {
         {
             let mut guard = self.lock();
@@ -283,7 +251,7 @@ impl PipelineCoordinator
     }
 
     /// Enqueues compressed APNG packet `seq`, blocking when `packets_in_flight` hits cap.
-    fn push_packet(&self, packet: RawApngPacket, cancel: &AtomicBool) -> bool
+    pub(super) fn push_packet(&self, packet: RawApngPacket, cancel: &AtomicBool) -> bool
     {
         let mut guard = self.lock();
         while guard.packets_in_flight >= self.max_in_flight
@@ -309,7 +277,7 @@ impl PipelineCoordinator
     }
 
     /// Stores an inflated APNG patch in the reorder buffer and wakes the sequential compositor.
-    fn push_decoded_patch(&self, patch: DecodedApngPatch, cancel: &AtomicBool)
+    pub(super) fn push_decoded_patch(&self, patch: DecodedApngPatch, cancel: &AtomicBool)
     {
         if cancel.load(Ordering::Acquire)
         {
@@ -327,7 +295,7 @@ impl PipelineCoordinator
     }
 
     /// Pops the next sequential inflated APNG patch, relieves packet backpressure, or stops cleanly.
-    fn pop_next_decoded_patch(&self, cancel: &AtomicBool) -> PatchNext
+    pub(super) fn pop_next_decoded_patch(&self, cancel: &AtomicBool) -> PatchNext
     {
         let mut guard = self.lock();
         loop
@@ -360,7 +328,7 @@ impl PipelineCoordinator
     }
 
     /// Enqueues raw frame `seq`, blocking on backpressure when `in_flight` hits `max_in_flight`.
-    fn push_raw(&self, seq: usize, raw: RawRgbaFrame, cancel: &AtomicBool) -> bool
+    pub(super) fn push_raw(&self, seq: usize, raw: RawRgbaFrame, cancel: &AtomicBool) -> bool
     {
         let mut guard = self.lock();
         while guard.in_flight >= self.max_in_flight
@@ -386,7 +354,7 @@ impl PipelineCoordinator
     }
 
     /// Claims the next worker job (prioritizing raw canvas encoding), or `None` when done/aborted.
-    fn pop_worker_job(&self, cancel: &AtomicBool) -> Option<WorkerJob>
+    pub(super) fn pop_worker_job(&self, cancel: &AtomicBool) -> Option<WorkerJob>
     {
         let mut guard = self.lock();
         loop
@@ -420,7 +388,7 @@ impl PipelineCoordinator
     }
 
     /// Stores encoded frame `seq` in the reorder buffer and notifies the sink consumer.
-    fn push_encoded(&self, seq: usize, encoded: EncodedFrame, cancel: &AtomicBool)
+    pub(super) fn push_encoded(&self, seq: usize, encoded: EncodedFrame, cancel: &AtomicBool)
     {
         if cancel.load(Ordering::Acquire)
         {
@@ -438,7 +406,7 @@ impl PipelineCoordinator
     }
 
     /// Pops the next sequential encoded frame, signals backpressure relief, or stops cleanly.
-    fn pop_next_ordered(&self, cancel: &AtomicBool) -> SinkNext
+    pub(super) fn pop_next_ordered(&self, cancel: &AtomicBool) -> SinkNext
     {
         let mut guard = self.lock();
         loop
@@ -468,333 +436,6 @@ impl PipelineCoordinator
             }
 
             guard = Self::wait_cv(&self.has_ordered_output, guard);
-        }
-    }
-}
-
-/// Computes default encode worker thread count bounded to preserve UI and compositor headroom.
-pub(crate) fn default_encode_workers() -> usize
-{
-    thread::available_parallelism()
-        .map(NonZeroUsize::get)
-        .unwrap_or(RESERVED_PIPELINE_THREADS)
-        .saturating_sub(RESERVED_PIPELINE_THREADS)
-        .clamp(MIN_ENCODE_WORKERS, MAX_ENCODE_WORKERS)
-}
-
-/// Clamps parallel worker count when `max_frames` caps the remaining animation length.
-fn effective_workers(max_frames: usize) -> usize
-{
-    let mut workers = default_encode_workers();
-    if max_frames > 1
-    {
-        workers = workers.min(max_frames - 1);
-    }
-    workers
-}
-
-/// Emits periodic decode-progress trace logs matching legacy worker cadence.
-fn log_batch_progress(count: usize, path: &Path)
-{
-    if count.is_multiple_of(PROGRESS_LOG_INTERVAL)
-    {
-        tracing::debug!(
-            frames_decoded = count,
-            path = %path.display(),
-            "Decoded animation batch"
-        );
-    }
-}
-
-/// Decodes frames `1..` from `iter` through a bounded parallel pool and delivers them in order.
-pub(crate) fn stream_remaining_frames<I>(
-    iter: I,
-    params: PipelineParams<'_>,
-    sink: Box<dyn FrameStreamSink>,
-) where
-    I: Iterator<Item = Result<RawRgbaFrame, CacheError>>,
-{
-    let workers = effective_workers(params.max_frames);
-    let coordinator = PipelineCoordinator::new(workers.saturating_mul(2), false);
-    let coord = &coordinator;
-    let base_width = params.base_width;
-    let cancel = params.cancel;
-
-    let sink_outcome = thread::scope(|scope| {
-        for _ in 0..workers
-        {
-            scope.spawn(move || run_pool_worker(coord, base_width, cancel, None));
-        }
-
-        let sink_handle = scope.spawn(move || run_ordered_sink(coord, cancel, sink));
-
-        run_sequential_reader(coord, iter, &params);
-        sink_handle.join().ok()
-    });
-
-    if let Some(outcome) = sink_outcome
-    {
-        outcome.sink.on_finish(outcome.cancelled, outcome.result);
-    }
-}
-
-/// Streams APNG frames `1..` through parallel PNG inflation, ordered compositing, and parallel LZ4 encode.
-pub(crate) fn stream_apng_remaining(
-    mut reader: ApngPacketReader,
-    header: ApngHeader,
-    compositor: ApngCompositor,
-    params: PipelineParams<'_>,
-    sink: Box<dyn FrameStreamSink>,
-)
-{
-    let workers = effective_workers(params.max_frames);
-    let coordinator = PipelineCoordinator::new(workers.saturating_mul(2), true);
-    let coord = &coordinator;
-    let base_width = params.base_width;
-    let cancel = params.cancel;
-    let apng_header = &header;
-    let path = params.path;
-
-    let sink_outcome = thread::scope(|scope| {
-        for _ in 0..workers
-        {
-            scope.spawn(move || {
-                run_pool_worker(coord, base_width, cancel, Some((path, apng_header)));
-            });
-        }
-
-        scope.spawn(move || run_apng_compositor(coord, compositor, path, cancel));
-        let sink_handle = scope.spawn(move || run_ordered_sink(coord, cancel, sink));
-
-        run_apng_packet_reader(coord, &mut reader, &params);
-        sink_handle.join().ok()
-    });
-
-    if let Some(outcome) = sink_outcome
-    {
-        outcome.sink.on_finish(outcome.cancelled, outcome.result);
-    }
-}
-
-/// Pulls decoded source frames sequentially from `iter` until EOF, `max_frames`, cancel, or error.
-fn run_sequential_reader<I>(coordinator: &PipelineCoordinator, iter: I, params: &PipelineParams<'_>)
-where
-    I: Iterator<Item = Result<RawRgbaFrame, CacheError>>,
-{
-    let mut count = 1_usize;
-    for next_raw in iter
-    {
-        if params.cancel.load(Ordering::Acquire)
-            || (params.max_frames > 0 && count >= params.max_frames)
-            || coordinator.is_aborted()
-        {
-            break;
-        }
-
-        match next_raw
-        {
-            Ok(raw) =>
-            {
-                if !coordinator.push_raw(count, raw, params.cancel)
-                {
-                    break;
-                }
-            }
-            Err(err) =>
-            {
-                coordinator.fail(err);
-                return;
-            }
-        }
-
-        count += 1;
-        log_batch_progress(count, params.path);
-    }
-
-    if params.cancel.load(Ordering::Acquire)
-    {
-        coordinator.abort();
-    }
-    else
-    {
-        coordinator.finish_reader();
-    }
-}
-
-/// Reads compressed APNG chunks sequentially until EOF, `max_frames`, cancel, or error.
-fn run_apng_packet_reader(
-    coordinator: &PipelineCoordinator,
-    reader: &mut ApngPacketReader,
-    params: &PipelineParams<'_>,
-)
-{
-    let mut count = 1_usize;
-    loop
-    {
-        if params.cancel.load(Ordering::Acquire)
-            || (params.max_frames > 0 && count >= params.max_frames)
-            || coordinator.is_aborted()
-        {
-            break;
-        }
-
-        match reader.next_packet()
-        {
-            Ok(Some(packet)) =>
-            {
-                if !coordinator.push_packet(packet, params.cancel)
-                {
-                    break;
-                }
-            }
-            Ok(None) => break,
-            Err(err) =>
-            {
-                coordinator.fail(err);
-                return;
-            }
-        }
-
-        count += 1;
-    }
-
-    if params.cancel.load(Ordering::Acquire)
-    {
-        coordinator.abort();
-    }
-    else
-    {
-        coordinator.finish_packet_reader();
-    }
-}
-
-/// Blends and disposes inflated APNG patches strictly in sequence order before parallel encoding.
-fn run_apng_compositor(
-    coordinator: &PipelineCoordinator,
-    mut compositor: ApngCompositor,
-    path: &Path,
-    cancel: &AtomicBool,
-)
-{
-    let mut count = 1_usize;
-    loop
-    {
-        let patch = match coordinator.pop_next_decoded_patch(cancel)
-        {
-            PatchNext::Patch(patch) => patch,
-            PatchNext::Done =>
-            {
-                coordinator.finish_reader();
-                return;
-            }
-            PatchNext::Stopped => return,
-        };
-
-        let seq = patch.seq;
-        let raw = match compositor.apply_patch(patch)
-        {
-            Ok(frame) => frame,
-            Err(err) =>
-            {
-                coordinator.fail(err);
-                return;
-            }
-        };
-
-        if !coordinator.push_raw(seq, raw, cancel)
-        {
-            return;
-        }
-
-        count += 1;
-        log_batch_progress(count, path);
-    }
-}
-
-/// Executes parallel APNG chunk inflation and RGBA-to-LZ4 compression on one scoped worker.
-fn run_pool_worker(
-    coordinator: &PipelineCoordinator,
-    base_width: u32,
-    cancel: &AtomicBool,
-    apng_ctx: Option<(&Path, &ApngHeader)>,
-)
-{
-    let mut resizer = Resizer::new();
-    while let Some(job) = coordinator.pop_worker_job(cancel)
-    {
-        match job
-        {
-            WorkerJob::Encode(seq, raw) =>
-            {
-                match encode_subsequent_frame(raw, base_width, &mut resizer)
-                {
-                    Ok(encoded) => coordinator.push_encoded(seq, encoded, cancel),
-                    Err(err) =>
-                    {
-                        coordinator.fail(err);
-                        break;
-                    }
-                }
-            }
-            WorkerJob::DecodeApng(packet) =>
-            {
-                let Some((path, header)) = apng_ctx
-                else
-                {
-                    continue;
-                };
-                match decode_apng_packet(path, header, packet)
-                {
-                    Ok(patch) => coordinator.push_decoded_patch(patch, cancel),
-                    Err(err) =>
-                    {
-                        coordinator.fail(err);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Delivers encoded frames to `sink` strictly in sequence order `1..`.
-fn run_ordered_sink(
-    coordinator: &PipelineCoordinator,
-    cancel: &AtomicBool,
-    mut sink: Box<dyn FrameStreamSink>,
-) -> SinkOutcome
-{
-    loop
-    {
-        let encoded = match coordinator.pop_next_ordered(cancel)
-        {
-            SinkNext::Frame(encoded) => encoded,
-            SinkNext::Done =>
-            {
-                return SinkOutcome {
-                    sink,
-                    cancelled: cancel.load(Ordering::Acquire),
-                    result: Ok(()),
-                };
-            }
-            SinkNext::Stopped(maybe_err) =>
-            {
-                return SinkOutcome {
-                    sink,
-                    cancelled: cancel.load(Ordering::Acquire),
-                    result: maybe_err.map_or(Ok(()), Err),
-                };
-            }
-        };
-
-        if let Err(err) = sink.on_frame(encoded)
-        {
-            coordinator.abort();
-            return SinkOutcome {
-                sink,
-                cancelled: cancel.load(Ordering::Acquire),
-                result: Err(err),
-            };
         }
     }
 }
