@@ -53,6 +53,20 @@ pub enum TickOutcome
     StopCallbacks,
 }
 
+/// Detailed playback advance result exposing catch-up skips and decode-frontier holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackStep
+{
+    /// Frame presentation decision produced for this tick.
+    pub outcome: TickOutcome,
+
+    /// Count of intermediate frames skipped while catching up to monotonic deadlines.
+    pub skipped_frames: u32,
+
+    /// Set when playback held at the final buffered frame while decoding was incomplete.
+    pub frontier_held: bool,
+}
+
 /// Tracks active animation frame index, monotonic microsecond deadline, and pause state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlaybackClock
@@ -162,6 +176,18 @@ impl PlaybackClock
     /// Advances playback against monotonic `now_us`, available `delays_us`, and `decode_done`.
     pub fn advance_us(&mut self, now_us: f64, delays_us: &[u32], decode_done: bool) -> TickOutcome
     {
+        self.advance_us_with_stats(now_us, delays_us, decode_done)
+            .outcome
+    }
+
+    /// Advances playback at microsecond resolution while returning skip and frontier-hold metrics.
+    pub fn advance_us_with_stats(
+        &mut self,
+        now_us: f64,
+        delays_us: &[u32],
+        decode_done: bool,
+    ) -> PlaybackStep
+    {
         let min_delay_us = self.min_delay_us;
         self.advance_with_unit(now_us, delays_us.len(), decode_done, |idx| {
             f64::from(delays_us[idx].max(min_delay_us))
@@ -176,6 +202,7 @@ impl PlaybackClock
         self.advance_with_unit(now_ms * scale, delays_ms.len(), decode_done, |idx| {
             (f64::from(delays_ms[idx]) * scale).max(min_delay_us)
         })
+        .outcome
     }
 
     /// Returns the stored next-frame deadline in microseconds if initialized.
@@ -224,21 +251,33 @@ impl PlaybackClock
         frame_count: usize,
         decode_done: bool,
         mut delay_us_at: impl FnMut(usize) -> f64,
-    ) -> TickOutcome
+    ) -> PlaybackStep
     {
         if self.paused
         {
             self.next_deadline_us = None;
-            return TickOutcome::StopCallbacks;
+            return PlaybackStep {
+                outcome: TickOutcome::StopCallbacks,
+                skipped_frames: 0,
+                frontier_held: false,
+            };
         }
 
         if frame_count <= 1
         {
             if decode_done
             {
-                return TickOutcome::StopCallbacks;
+                return PlaybackStep {
+                    outcome: TickOutcome::StopCallbacks,
+                    skipped_frames: 0,
+                    frontier_held: false,
+                };
             }
-            return TickOutcome::NoChange;
+            return PlaybackStep {
+                outcome: TickOutcome::NoChange,
+                skipped_frames: 0,
+                frontier_held: true,
+            };
         }
 
         if self.index >= frame_count
@@ -255,6 +294,8 @@ impl PlaybackClock
         }
 
         let prev_index = self.index;
+        let mut advances = 0_u32;
+        let mut frontier_held = false;
         while now_us >= *deadline
         {
             let mut next_index = self.index + 1;
@@ -264,22 +305,30 @@ impl PlaybackClock
                 {
                     let hold_delay = delay_us_at(self.index);
                     *deadline = now_us + hold_delay;
+                    frontier_held = true;
                     break;
                 }
                 next_index = 0;
             }
 
             self.index = next_index;
+            advances = advances.saturating_add(1);
             *deadline += delay_us_at(self.index);
         }
 
-        if self.index != prev_index
+        let outcome = if self.index != prev_index
         {
             TickOutcome::FrameChanged(self.index)
         }
         else
         {
             TickOutcome::NoChange
+        };
+
+        PlaybackStep {
+            outcome,
+            skipped_frames: advances.saturating_sub(1),
+            frontier_held,
         }
     }
 }

@@ -2,7 +2,7 @@
 
 use animated_image_widget::playback::{
     CACHE_MIN_FRAME_DELAY_US, DEFAULT_FRAME_DELAY_US, DEFAULT_MAX_FPS, MIN_FRAME_DELAY_MS,
-    MIN_FRAME_DELAY_US, PlaybackClock, TickOutcome,
+    MIN_FRAME_DELAY_US, PlaybackClock, PlaybackStep, TickOutcome,
 };
 
 #[test]
@@ -195,4 +195,50 @@ fn playback_respects_default_240fps_and_custom_max_fps_ceilings()
         TickOutcome::NoChange
     );
     assert_eq!(clock_360.next_deadline_us(), Some(2_778.0));
+}
+
+#[test]
+fn playback_step_tracks_catchup_skips_and_decode_frontier_holds()
+{
+    let mut clock = PlaybackClock::new();
+
+    // Waiting on frame 0 while background decode has 1 frame reports frontier_held = true.
+    assert_eq!(
+        clock.advance_us_with_stats(0.0, &[8_333], false),
+        PlaybackStep {
+            outcome: TickOutcome::NoChange,
+            skipped_frames: 0,
+            frontier_held: true,
+        }
+    );
+
+    let delays = [8_333_u32; 5];
+    assert_eq!(
+        clock.advance_us_with_stats(0.0, &delays, false),
+        PlaybackStep {
+            outcome: TickOutcome::NoChange,
+            skipped_frames: 0,
+            frontier_held: false,
+        }
+    );
+
+    // Jumping 3 frame intervals in one tick advances once and reports 2 skipped intermediate frames.
+    assert_eq!(
+        clock.advance_us_with_stats(25_000.0, &delays, true),
+        PlaybackStep {
+            outcome: TickOutcome::FrameChanged(3),
+            skipped_frames: 2,
+            frontier_held: false,
+        }
+    );
+
+    // Reaching the buffered tail before decoding finishes marks frontier_held = true.
+    assert_eq!(
+        clock.advance_us_with_stats(50_000.0, &delays, false),
+        PlaybackStep {
+            outcome: TickOutcome::FrameChanged(4),
+            skipped_frames: 0,
+            frontier_held: true,
+        }
+    );
 }

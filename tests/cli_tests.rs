@@ -50,6 +50,7 @@ fn cli_applies_default_flags()
         64 * 1024 * 1024
     );
     assert!(!args.edit);
+    assert!(!args.stats);
     assert!(!args.debug);
 }
 
@@ -72,6 +73,7 @@ fn cli_parses_explicit_flags()
         "-f",
         "120",
         "--edit",
+        "--stats",
         "--debug",
     ])
     .expect("explicit CLI flags should parse");
@@ -94,6 +96,7 @@ fn cli_parses_explicit_flags()
         256 * 1024 * 1024
     );
     assert!(args.edit);
+    assert!(args.stats);
     assert!(args.debug);
 
     let zero_outcome = CliArgs::parse_flags_from([
@@ -176,6 +179,7 @@ fn cli_handles_help_flag_as_early_exit()
         "--cap",
         "--max-fps",
         "--edit",
+        "--stats",
         "--debug",
         "on corner handle",
         "Triple-click",

@@ -2,7 +2,7 @@
 //!
 //! Preserves exact CLI parity with the Python launcher (`FILE`, `-n`/`--max-frames`,
 //! `-w`/`--base-width`, `-m`/`--monitor`, `-s`/`--scale`, `-r`/`--ram-cache-mb`, `-c`/`--cap`,
-//! `-f`/`--max-fps`, `-e`/`--edit`, and `-d`/`--debug`) while rejecting invalid numeric inputs
+//! `-f`/`--max-fps`, `-e`/`--edit`, `--stats`, and `-d`/`--debug`) while rejecting invalid numeric inputs
 //! and missing files.
 
 // Standard path and OS argument string types.
@@ -149,6 +149,13 @@ pub struct CliArgs
         help = "Start in interactive edit mode (border and keyboard shortcuts enabled)."
     )]
     pub edit: bool,
+
+    /// Print periodic 1-second playback, decode, and cache performance stats to stdout.
+    #[arg(
+        long = "stats",
+        help = "Print 1-second playback FPS, skip/hold, staging, and cache stats to stdout."
+    )]
+    pub stats: bool,
 
     /// Mirror debug diagnostics to stdout alongside rolling daily log files.
     #[arg(
