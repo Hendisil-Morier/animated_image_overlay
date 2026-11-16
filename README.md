@@ -4,7 +4,7 @@ Self-contained transparent, click-through Wayland desktop widget for playing ani
 
 ## Requirements
 
-- A Wayland compositor supporting `zwlr_layer_shell_v1`, `wl_subcompositor`, `wl_shm`, and `wp_viewporter` (such as Sway, Hyprland, River, or KDE KWin; not supported on X11 or GNOME Shell)
+- A Wayland compositor supporting `zwlr_layer_shell_v1`, `wl_subcompositor`, `wl_shm`, and `wp_viewporter` (such as Sway, Hyprland, niri, River, or KDE KWin; not supported on X11 or GNOME Shell)
 - Rust toolchain (stable or nightly for `rustfmt`) and a C toolchain for building the bundled `webp-animation` codec
 
 ## Build and Usage
@@ -69,7 +69,7 @@ Signals:
 ## Configuration, Cache, and Logs
 
 - **`$XDG_CONFIG_HOME/apng-overlay.json` (default `~/.config/apng-overlay.json`)**: Stores `x`, `y`, `scale`, `rotation` (degrees in `[0.0, 360.0)`, using zero-copy compositor transforms on exact 90-degree multiples and smooth bilinear CPU resampling at fractional angles), and `flipped` (`true` or `false`) keyed by lexically normalized absolute file path (`. ` / `..` collapsed without dereferencing symlinks). Uses `500 ms` debounced saves serialized with an exclusive `flock` on `<config>.lock` and atomic temp-file replacement so concurrent instances preserve one another's entries.
-- **`$XDG_CACHE_HOME/apng-overlay/` (default `~/.cache/apng-overlay/`)**: Stores headerless `lz4_flex`-compressed premultiplied `ARGB8888` chunks (`.lraw`) and sidecar `.json` metadata written strictly after `.lraw`. Frame 0 displays immediately while remaining frames stream in the background. Active cache entries refresh timestamps on hits, entries older than 30 days (`.json`, `.raw`, `.zraw`, `.lraw`) are pruned automatically at startup, and two independent RAM tiers control playback caching:
+- **`$XDG_CACHE_HOME/apng-overlay/` (default `~/.cache/apng-overlay/`)**: Stores headerless `lz4_flex`-compressed premultiplied `ARGB8888` chunks (`.lraw`) and sidecar `.json` metadata (`delays_us` at microsecond precision with a `1_000 us` storage floor, clamped at runtime by `-f`/`--max-fps`) written strictly after `.lraw`. Frame 0 displays immediately while a sequential container reader feeds a bounded worker pool scaling and LZ4-compressing remaining frames in order (flushing early frames 1 by 1 before 4-frame batching). Active cache entries refresh timestamps on hits, entries older than 30 days (`.json`, `.raw`, `.zraw`, `.lraw`) are pruned automatically at startup, and two independent RAM tiers control playback caching:
   - Source LRU (`-r` / `-c ram`, default `128 MiB`): Keeps decoded full-frame buffers in RAM for zero-copy streaming when the entire unpacked loop fits budget, switching dynamically to positional `.lraw` disk chunk streaming on larger files.
   - Display Cache (`-c display`, default `64 MiB`): Stores rendered fractional rotations and Lanczos3-downscaled oversized quarter-turn frames (`DisplayFrameCache` paired with compositor `set_buffer_transform`) at physical display resolution, dropping steady-state CPU from continuous LZ4 decompression (`~32%` core) to lightweight SHM `memcpy` (`< 1%` core) while bypassing caching cleanly on large overlays.
 - **`$XDG_CACHE_HOME/apng-overlay/logs/` (default `~/.cache/apng-overlay/logs/`)**: Daily rotating log files (`apng-overlay.*.log`, retaining up to 7 files).
