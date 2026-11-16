@@ -1,12 +1,15 @@
 //! Integration tests verifying triple-click edit toggling, pointer drags, scroll scaling,
 //! middle-click quit, hover fade timers, edit-mode keyboard shortcuts, and monitor selection.
 
+use std::time::{Duration, Instant};
+
 use animated_image_widget::{
     config::OverlayState,
     layout::{FlipAxis, KEYBOARD_NUDGE_PX, OverlayLayout, Rotation},
+    playback::{PlaybackStep, TickOutcome},
     wayland::{
-        ClickTracker, InputEffects, InputState, KeyShortcut, MonitorDescriptor, PointerCursor,
-        TRIPLE_CLICK_WINDOW_MS,
+        ClickTracker, InputEffects, InputState, KeyShortcut, MonitorDescriptor, OverlayStats,
+        PointerCursor, StatsSnapshot, TRIPLE_CLICK_WINDOW_MS,
         chrome::{
             ChromeGeometry, HANDLE_FADED_ALPHA, HANDLE_HOVER_ALPHA, HANDLE_IDLE_ALPHA,
             handle_opacity_alpha, needs_chrome_rebuild,
@@ -647,4 +650,80 @@ fn input_effects_coalesce_scene_flags_without_dropping_transitions()
     assert!(pending.handle_visual_changed);
     assert_eq!(pending.edit_mode_changed, Some(false));
     assert!(!pending.schedule_save);
+}
+
+#[test]
+fn overlay_stats_formats_fps_cache_state_and_one_shot_decode_completion()
+{
+    let t0 = Instant::now();
+    let mut cold = OverlayStats::new(t0, false);
+
+    cold.record_tick(PlaybackStep {
+        outcome: TickOutcome::FrameChanged(1),
+        skipped_frames: 2,
+        frontier_held: true,
+    });
+    cold.record_presented(Duration::from_micros(100));
+    cold.record_presented(Duration::from_micros(300));
+
+    let line1 = cold.take_interval_report(
+        t0 + Duration::from_secs(1),
+        StatsSnapshot {
+            frame_index: 5,
+            frame_count: 20,
+            decode_done: false,
+            paused: false,
+            fits_source_ram: true,
+            ram_used_bytes: 10 * 1024 * 1024,
+            display_cache_active: false,
+            display_cache_bytes: 0,
+        },
+    );
+    assert!(line1.contains("fps=2.0 frame=6/20 skips=2 holds=1 stage_us=200/300"));
+    assert!(line1.contains("cache=ram(10.0MiB) disp=off decode=decoding(20f)"));
+
+    // Window counters reset cleanly on `take_interval_report`.
+    let line2 = cold.take_interval_report(
+        t0 + Duration::from_secs(2),
+        StatsSnapshot {
+            frame_index: 5,
+            frame_count: 180,
+            decode_done: true,
+            paused: true,
+            fits_source_ram: false,
+            ram_used_bytes: 0,
+            display_cache_active: true,
+            display_cache_bytes: 32 * 1024 * 1024,
+        },
+    );
+    assert!(line2.contains("fps=0.0 paused frame=6/180 skips=0 holds=0 stage_us=0/0"));
+    assert!(line2.contains("cache=lraw disp=32.0MiB decode=done(180f)"));
+
+    // Cold decode completion emits exactly once when `decode_done` flips true.
+    assert!(
+        cold.check_decode_completion(t0 + Duration::from_secs(2), 180, true)
+            .is_some_and(|msg| msg.contains("cold decode finished: 180 frames in 2.00s"))
+    );
+    assert!(
+        cold.check_decode_completion(t0 + Duration::from_secs(3), 180, true)
+            .is_none()
+    );
+
+    // Warm cache launches omit cold-decode completion and tag `decode=warm(...)`.
+    let mut warm = OverlayStats::new(t0, true);
+    assert!(warm.check_decode_completion(t0, 60, true).is_none());
+    let warm_line = warm.format_report(
+        Duration::from_secs(1),
+        StatsSnapshot {
+            frame_index: 0,
+            frame_count: 60,
+            decode_done: true,
+            paused: false,
+            fits_source_ram: true,
+            ram_used_bytes: 0,
+            display_cache_active: false,
+            display_cache_bytes: 0,
+        },
+    );
+    assert!(warm_line.contains("decode=warm(60f)"));
 }

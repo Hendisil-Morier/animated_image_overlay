@@ -23,12 +23,13 @@ use wayland_client::{
 };
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 
-// Runtime coordinator, input state, monitor resolution, and overlay scene setup.
+// Runtime coordinator, input state, monitor resolution, overlay scene, and stats setup.
 use super::{
     input::InputState,
     monitor::{MonitorDescriptor, resolve_monitor_index},
     runtime::OverlayRuntime,
     scene::OverlayScene,
+    stats::OverlayStats,
 };
 use crate::{
     cache::{FrameCache, WakeupCallback},
@@ -107,6 +108,9 @@ pub fn run_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayE
     // Create the cursor surface before `roundtrip` so `Capability::Pointer` binds immediately.
     let cursor_surface = bindings.compositor.create_surface(&qh);
 
+    let initial_decode_done = startup.cache.is_decode_done();
+    let now = Instant::now();
+
     let mut runtime = OverlayRuntime {
         conn: conn.clone(),
         qh: qh.clone(),
@@ -127,13 +131,17 @@ pub fn run_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayE
         layout: OverlayLayout::new(frame_w, frame_h, 1920, 1080, startup.initial_state),
         input: InputState::with_editing(cli.edit),
         playback: PlaybackClock::with_max_fps(cli.max_fps),
-        start_instant: Instant::now(),
+        start_instant: now,
+        stats: cli
+            .stats
+            .then(|| OverlayStats::new(now, initial_decode_done)),
         configured: false,
         frame_callback_pending: false,
         dirty_save: false,
         frame_timer_token: None,
         save_timer_token: None,
         fade_timer_token: None,
+        stats_timer_token: None,
         exit_requested: false,
     };
 
@@ -159,6 +167,7 @@ pub fn run_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayE
     runtime.scene = Some(scene);
 
     register_loop_sources(&loop_handle, conn, event_queue, signals, ping_source)?;
+    runtime.schedule_stats_timer_if_enabled();
     tracing::info!(
         monitor = target_desc.name.as_deref().unwrap_or("unknown"),
         screen_w = target_desc.width,

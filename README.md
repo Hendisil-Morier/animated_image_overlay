@@ -18,7 +18,7 @@ cargo build --release
 Run the overlay:
 
 ```bash
-./target/release/animated_image_widget FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE] [-r RAM_CACHE_MB] [-c ram=<MB>,display=<MB>]... [-e] [-d]
+./target/release/animated_image_widget FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE] [-r RAM_CACHE_MB] [-c ram=<MB>,display=<MB>]... [-f MAX_FPS] [-e] [--stats] [-d]
 ```
 
 Options:
@@ -29,7 +29,9 @@ Options:
 - `-s`, `--scale`: Initial display scale, overriding any saved scale for that file.
 - `-r`, `--ram-cache-mb`: RAM limit in MiB for keeping short animations unpacked in memory; larger files read one frame at a time from disk (`0` always reads from disk; default: `128`; overridden if `-c ram=<MB>` is also given).
 - `-c`, `--cap`: Repeatable comma-separated memory ceilings in MiB accepting `ram=<MB>` and `display=<MB>` individually or together (`-c ram=10`, `-c display=32`, `-c ram=10,display=32`, `-c ram=10 -c display=32`; `0` disables that tier; defaults: `ram=128,display=64`). When both `-r` and `-c ram=<MB>` are supplied, `-c ram` takes precedence regardless of argument order.
+- `-f`, `--max-fps`: Maximum playback frame rate in FPS (`1..=1000`, default: `240`).
 - `-e`, `--edit`: Launch directly into interactive edit mode.
+- `--stats`: Print 1-second playback FPS, catch-up skips, `!decode_done` frontier holds, staging latency (`us`), and RAM/display cache telemetry to stdout.
 - `-d`, `--debug`: Mirror `DEBUG`-level diagnostics to stdout alongside the rolling daily log files under `$XDG_CACHE_HOME/apng-overlay/logs/`.
 
 ### Environment Variables
@@ -82,9 +84,9 @@ Rust crate modules under `src/`:
 - `src/error.rs`, `src/atomic_fs.rs`, & `src/xdg.rs`: Typed `thiserror` errors, RAII atomic temp-file writers, and shared XDG directory lookup.
 - `src/config.rs`: `flock`-serialized JSON config persistence and per-field corruption recovery.
 - `src/layout.rs` & `src/playback.rs`: Pure monitor-clamped geometry calculations and drift/stall-resilient frame clock.
-- `src/decode/`: Streaming APNG, GIF, animated WebP, and static decoding (`codecs.rs`, `pixel.rs`, `stream.rs`).
+- `src/decode/`: Streaming APNG, GIF, animated WebP, and static decoding (`codecs.rs`, `pipeline.rs`, `pixel.rs`, `stream.rs`).
 - `src/cache/`: Deterministic `.lraw`/`.json` disk storage and 30-day pruning (`disk.rs`), configurable RAM LRU store (`memory.rs`), warm chunk reader (`reader.rs`), decode writer (`sink.rs`), and `FrameCache` facade (`store.rs`).
-- `src/wayland/`: `calloop` event-loop bootstrap (`app.rs`), runtime timer/state coordination (`runtime.rs`), Wayland protocol dispatch (`handlers.rs`), layer-shell/subsurface scene (`scene.rs`), frame resampling and SHM staging (`frame_stage.rs`), display-resolution frame cache (`display_cache.rs`), corner handle and dashed border chrome (`chrome.rs`), handle/outline pixel rasterizer (`chrome_raster.rs`), `SlotPool` frame ring (`shm_ring.rs`), monitor lookup (`monitor.rs`), pointer state (`input.rs`), and triple-click/shortcut mapping (`shortcuts.rs`).
+- `src/wayland/`: `calloop` event-loop bootstrap (`app.rs`), runtime timer/state coordination (`runtime.rs`), periodic `--stats` telemetry (`stats.rs`), Wayland protocol dispatch (`handlers.rs`), layer-shell/subsurface scene (`scene.rs`), frame resampling and SHM staging (`frame_stage.rs`), display-resolution frame cache (`display_cache.rs`), corner handle and dashed border chrome (`chrome.rs`), handle/outline pixel rasterizer (`chrome_raster.rs`), `SlotPool` frame ring (`shm_ring.rs`), monitor lookup (`monitor.rs`), pointer state (`input.rs`), and triple-click/shortcut mapping (`shortcuts.rs`).
 
 Run formatting, linting, Rust integration tests (`tests/`), and API doc checks:
 

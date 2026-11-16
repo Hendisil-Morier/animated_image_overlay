@@ -25,16 +25,17 @@ use wayland_client::{
     protocol::{wl_keyboard::WlKeyboard, wl_surface::WlSurface},
 };
 
-// Frame cache, config store, layout math, playback clock, input state, and Wayland scene.
+// Frame cache, config store, layout math, playback clock, input state, Wayland scene, and stats.
 use super::{
     input::{HANDLE_FADE_MS, InputEffects, InputState, PointerCursor, SAVE_DEBOUNCE_MS},
     scene::OverlayScene,
+    stats::{OverlayStats, STATS_INTERVAL_MS, StatsSnapshot},
 };
 use crate::{
     cache::FrameCache,
     config::ConfigStore,
     layout::OverlayLayout,
-    playback::{PlaybackClock, TickOutcome},
+    playback::{PlaybackClock, PlaybackStep, TickOutcome},
 };
 
 // Recovery delay in milliseconds after a cache read or SHM frame upload error.
@@ -103,6 +104,9 @@ pub(crate) struct OverlayRuntime
     // Monotonic startup instant providing millisecond timestamps to `PlaybackClock`.
     pub(crate) start_instant: Instant,
 
+    // Optional `--stats` accumulator emitting periodic 1-second playback and cache metrics.
+    pub(crate) stats: Option<OverlayStats>,
+
     // Tracks whether the compositor has delivered the initial `wl_layer_surface::configure`.
     pub(crate) configured: bool,
 
@@ -120,6 +124,9 @@ pub(crate) struct OverlayRuntime
 
     // Active `2000 ms` handle idle auto-fade timer registration.
     pub(crate) fade_timer_token: Option<RegistrationToken>,
+
+    // Active 1-second periodic `--stats` stdout telemetry timer registration.
+    pub(crate) stats_timer_token: Option<RegistrationToken>,
 
     // Termination flag triggered by signals, `q`, middle-click, or compositor layer close.
     pub(crate) exit_requested: bool,
@@ -161,20 +168,25 @@ impl OverlayRuntime
         }
 
         let now_us = self.start_instant.elapsed().as_secs_f64() * 1_000_000.0;
-        let (outcome, wait_us) = self.cache.with_delays_us(|delays_us, decode_done| {
-            let outcome = self.playback.advance_us(now_us, delays_us, decode_done);
-            let wait_us = if matches!(outcome, TickOutcome::NoChange)
-            {
-                self.playback.us_until_next_frame(now_us)
-            }
-            else
-            {
-                None
-            };
-            (outcome, wait_us)
-        });
+        let (step, wait_us, frame_count, decode_done) =
+            self.cache.with_delays_us(|delays_us, decode_done| {
+                let step = self
+                    .playback
+                    .advance_us_with_stats(now_us, delays_us, decode_done);
+                let wait_us = if matches!(step.outcome, TickOutcome::NoChange)
+                {
+                    self.playback.us_until_next_frame(now_us)
+                }
+                else
+                {
+                    None
+                };
+                (step, wait_us, delays_us.len(), decode_done)
+            });
 
-        match outcome
+        self.record_tick_stats(step, frame_count, decode_done);
+
+        match step.outcome
         {
             TickOutcome::StopCallbacks =>
             {}
@@ -198,16 +210,39 @@ impl OverlayRuntime
             return;
         };
 
+        let stage_start = self.stats.is_some().then(Instant::now);
         let staged = scene.stage_frame_cached(&self.shm, &self.layout, &self.cache, idx);
 
         match staged
         {
-            Ok(_retired_ring) => self.queue_image_frame_callback(),
+            Ok(_retired_ring) =>
+            {
+                if let (Some(start), Some(stats)) = (stage_start, &mut self.stats)
+                {
+                    stats.record_presented(start.elapsed());
+                }
+                self.queue_image_frame_callback();
+            }
             Err(err) =>
             {
                 tracing::warn!(error = %err, frame_index = idx, "Failed presenting frame");
                 self.schedule_frame_timer(Duration::from_millis(FRAME_ERROR_RETRY_MS));
             }
+        }
+    }
+
+    /// Updates `--stats` tick counters and logs cold-decode completion the instant it finishes.
+    fn record_tick_stats(&mut self, step: PlaybackStep, frame_count: usize, decode_done: bool)
+    {
+        let Some(stats) = &mut self.stats
+        else
+        {
+            return;
+        };
+        stats.record_tick(step);
+        if let Some(msg) = stats.check_decode_completion(Instant::now(), frame_count, decode_done)
+        {
+            println!("{msg}");
         }
     }
 
@@ -398,6 +433,67 @@ impl OverlayRuntime
         );
     }
 
+    /// Arms or re-arms the 1-second periodic `--stats` reporter when telemetry is enabled.
+    pub(crate) fn schedule_stats_timer_if_enabled(&mut self)
+    {
+        if self.stats.is_none()
+        {
+            return;
+        }
+        arm_timer(
+            &self.loop_handle,
+            &mut self.stats_timer_token,
+            Duration::from_millis(STATS_INTERVAL_MS),
+            Self::on_stats_timer,
+        );
+    }
+
+    /// Cancels an active `--stats` reporting timer if armed.
+    pub(crate) fn cancel_stats_timer(&mut self)
+    {
+        clear_timer(&self.loop_handle, &mut self.stats_timer_token);
+    }
+
+    /// Emits a 1-second `--stats` summary line to stdout and reschedules the next sample.
+    fn on_stats_timer(&mut self)
+    {
+        self.stats_timer_token = None;
+        let now = Instant::now();
+        let snap = self.collect_stats_snapshot();
+        if let Some(stats) = &mut self.stats
+        {
+            if let Some(msg) =
+                stats.check_decode_completion(now, snap.frame_count, snap.decode_done)
+            {
+                println!("{msg}");
+            }
+            let report = stats.take_interval_report(now, snap);
+            println!("{report}");
+        }
+        self.schedule_stats_timer_if_enabled();
+    }
+
+    /// Captures live frame progress and RAM/display cache byte counts without blocking decoding.
+    fn collect_stats_snapshot(&self) -> StatsSnapshot
+    {
+        let (frame_count, decode_done, fits_source_ram) = self.cache.cache_profile();
+        let (display_cache_active, display_cache_bytes) = self
+            .scene
+            .as_ref()
+            .map_or((false, 0), OverlayScene::display_cache_stats);
+
+        StatsSnapshot {
+            frame_index: self.playback.current_index(),
+            frame_count,
+            decode_done,
+            paused: self.playback.is_paused(),
+            fits_source_ram,
+            ram_used_bytes: self.cache.ram_used_bytes(),
+            display_cache_active,
+            display_cache_bytes,
+        }
+    }
+
     /// Advances animation playback once the scheduled wait or error-recovery timer fires.
     fn on_frame_timer(&mut self)
     {
@@ -471,6 +567,7 @@ impl OverlayRuntime
         self.cancel_frame_timer();
         self.cancel_fade_timer();
         self.cancel_save_timer();
+        self.cancel_stats_timer();
         self.flush_pending_save();
         self.cache.stop();
         tracing::info!("Wayland overlay shutdown cleanup complete");

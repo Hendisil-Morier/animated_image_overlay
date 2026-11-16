@@ -325,6 +325,12 @@ impl OverlayScene
             .needs_buffer_resync(layout, cache, self.chrome.scale())
     }
 
+    /// Reports whether display-resolution caching is active and how many bytes it holds.
+    pub(crate) fn display_cache_stats(&self) -> (bool, usize)
+    {
+        self.frame_stage.display_cache_stats()
+    }
+
     /// Re-uploads `frame_idx` for `layout` orientation and atomically commits buffer + layout changes.
     pub(crate) fn refresh_frame_cached(
         &mut self,

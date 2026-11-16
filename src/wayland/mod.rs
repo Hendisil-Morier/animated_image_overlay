@@ -39,6 +39,9 @@ pub mod shm_ring;
 // Triple-click detection, edit-mode keyboard shortcuts, and scroll normalization.
 pub mod shortcuts;
 
+// Periodic `--stats` playback, staging latency, and cache memory telemetry.
+pub mod stats;
+
 // Top-level Wayland overlay execution entry point and early signal masker.
 pub use app::{prepare_signals, run_overlay};
 // Pure pointer interaction state machine exports for application and integration tests.
@@ -51,3 +54,5 @@ pub use scene::wl_transform_for_orientation;
 pub use shortcuts::{
     ClickTracker, KeyShortcut, TRIPLE_CLICK_DISTANCE_PX, TRIPLE_CLICK_WINDOW_MS, map_edit_keysym,
 };
+// Runtime performance telemetry exports for application and integration tests.
+pub use stats::{OverlayStats, STATS_INTERVAL_MS, StatsSnapshot};

@@ -289,6 +289,15 @@ impl FrameStage
         ring_needs_resync((spec.width, spec.height), self.frame_ring.dimensions())
     }
 
+    /// Reports whether display-resolution caching is active and how many bytes it holds.
+    pub(crate) fn display_cache_stats(&self) -> (bool, usize)
+    {
+        (
+            self.display_cache.is_active(),
+            self.display_cache.cached_bytes(),
+        )
+    }
+
     /// Convenience wrapper invoking `compute_buffer_target_spec` with `self.display_cache`.
     fn target_spec(
         &self,

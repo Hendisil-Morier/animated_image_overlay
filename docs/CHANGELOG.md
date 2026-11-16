@@ -5,6 +5,7 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Added `--stats` CLI flag and `OverlayStats` (`src/wayland/stats.rs`) to emit 1-second stdout telemetry reporting presented FPS, catch-up frame skips, `!decode_done` frontier holds, frame staging latency (`avg`/`max` `us`), source RAM / `DisplayFrameCache` usage, and one-shot cold decode completion throughput.
 - Added `-f` / `--max-fps` CLI flag (`CliArgs::max_fps`, `1..=1000`, default `240` fps) and `PlaybackClock::with_max_fps` to configure the playback frame rate ceiling.
 
 ### Changed
