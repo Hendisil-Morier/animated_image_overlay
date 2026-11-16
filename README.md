@@ -31,7 +31,7 @@ Options:
 - `-c`, `--cap`: Repeatable comma-separated memory ceilings in MiB accepting `ram=<MB>` and `display=<MB>` individually or together (`-c ram=10`, `-c display=32`, `-c ram=10,display=32`, `-c ram=10 -c display=32`; `0` disables that tier; defaults: `ram=128,display=64`). When both `-r` and `-c ram=<MB>` are supplied, `-c ram` takes precedence regardless of argument order.
 - `-f`, `--max-fps`: Maximum playback frame rate in FPS (`1..=1000`, default: `240`).
 - `-e`, `--edit`: Launch directly into interactive edit mode.
-- `--stats`: Print 1-second playback FPS, catch-up skips, `!decode_done` frontier holds, staging latency (`us`), and RAM/display cache telemetry to stdout.
+- `--stats`: Print 1-second playback FPS, per-core (`cpu`) and normalized host (`host`) CPU utilization, overall process RAM usage (`ram`), catch-up skips, `!decode_done` frontier holds, staging latency (`us`), and RAM/display cache telemetry to stdout.
 - `-d`, `--debug`: Mirror `DEBUG`-level diagnostics to stdout alongside the rolling daily log files under `$XDG_CACHE_HOME/apng-overlay/logs/`.
 
 ### Environment Variables
@@ -74,7 +74,7 @@ Signals:
   - Display Cache (`-c display`, default `64 MiB`): Stores rendered fractional rotations and Lanczos3-downscaled oversized quarter-turn frames (`DisplayFrameCache` paired with compositor `set_buffer_transform`) at physical display resolution, dropping steady-state CPU from continuous LZ4 decompression (`~32%` core) to lightweight SHM `memcpy` (`< 1%` core) while bypassing caching cleanly on large overlays.
 - **`$XDG_CACHE_HOME/apng-overlay/logs/` (default `~/.cache/apng-overlay/logs/`)**: Daily rotating log files (`apng-overlay.*.log`, retaining up to 7 files).
 
-Architecture internals, wire formats, and CPU/memory benchmarks are documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/decisions/001-display-cache-and-resampling.md](docs/decisions/001-display-cache-and-resampling.md), [docs/CHANGELOG.md](docs/CHANGELOG.md), and [docs/CODING_STYLE.md](docs/CODING_STYLE.md).
+Architecture internals, wire formats, and design decisions are documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), ADRs ([001](docs/decisions/001-display-cache-and-resampling.md), [002](docs/decisions/002-microsecond-timing-and-compositor-sync.md), [003](docs/decisions/003-parallel-apng-decode-pipeline.md)), [docs/CHANGELOG.md](docs/CHANGELOG.md), and [docs/CODING_STYLE.md](docs/CODING_STYLE.md).
 
 ## Structure and Tests
 

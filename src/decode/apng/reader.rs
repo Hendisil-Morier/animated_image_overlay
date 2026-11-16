@@ -1,33 +1,29 @@
-//! Streaming APNG chunk splitter, standalone frame decoder, and sequential canvas compositor.
-//!
-//! Separates independent per-frame zlib decompression and scanline unfiltering from sequential
-//! `DisposeOp`/`BlendOp` canvas compositing so worker pools can decode APNG frames in parallel.
+//! Streaming single-open APNG chunk splitter extracting sequential compressed frame packets.
 
-// Buffered file I/O, chunk framing, paths, and in-memory PNG cursors.
+// Buffered file I/O, chunk framing, and explicit static-PNG rewind seeks.
 use std::{
     fs::File,
-    io::{BufReader, Cursor, Read, Seek, SeekFrom},
+    io::{BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
-// Standard PNG frame decoder and exact Porter-Duff straight-alpha pixel blender.
-use image::{DynamicImage, Pixel, Rgba, codecs::png::PngDecoder};
-
-// Shared raw frame output, overflow-safe byte math, and microsecond delay floor.
-use super::{
-    codecs::{decode_err, io_err},
-    pixel::{BYTES_PER_PIXEL, RawRgbaFrame, checked_argb_byte_len},
+// Contextual decoder/I/O error wrappers and overflow-safe canvas byte validation.
+use crate::{
+    decode::{
+        codecs::{decode_err, io_err},
+        pixel::checked_argb_byte_len,
+    },
+    error::CacheError,
 };
-use crate::{error::CacheError, playback::PlaybackClock};
 
 // Standard 8-byte PNG file signature preceding all chunks.
-const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+pub(super) const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 
 // Maximum single PNG chunk payload accepted to reject malformed length prefixes cleanly.
 const MAX_PNG_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 
 // Expected byte length of PNG `IHDR` header payload.
-const IHDR_DATA_LEN: usize = 13;
+pub(super) const IHDR_DATA_LEN: usize = 13;
 
 // Expected byte length of APNG `acTL` animation control payload.
 const ACTL_DATA_LEN: usize = 8;
@@ -37,72 +33,6 @@ const FCTL_DATA_LEN: usize = 26;
 
 // Minimum byte length of APNG `fdAT` payload (`4`-byte sequence prefix + compressed stream).
 const FDAT_SEQ_PREFIX_LEN: usize = 4;
-
-// APNG `dispose_op`: preserve canvas untouched before the next frame.
-const DISPOSE_NONE: u8 = 0;
-
-// APNG `dispose_op`: clear the rendered patch rectangle to transparent black.
-const DISPOSE_BACKGROUND: u8 = 1;
-
-// APNG `dispose_op`: restore the canvas patch rectangle from prior state.
-const DISPOSE_PREVIOUS: u8 = 2;
-
-// APNG `blend_op`: overwrite destination pixels directly.
-const BLEND_SOURCE: u8 = 0;
-
-// APNG `blend_op`: Porter-Duff straight-alpha `OVER` blend onto destination pixels.
-const BLEND_OVER: u8 = 1;
-
-// Precomputed IEEE CRC-32 lookup table (`0xEDB88320`) used when framing standalone PNG chunks.
-const CRC32_TABLE: [u32; 256] = build_crc32_table();
-
-/// Generates the 256-entry IEEE CRC-32 table at compile time cleanly in safe Rust.
-const fn build_crc32_table() -> [u32; 256]
-{
-    let mut table = [0_u32; 256];
-    let mut idx = 0_usize;
-    while idx < 256
-    {
-        let mut crc = idx as u32;
-        let mut bit = 0;
-        while bit < 8
-        {
-            if (crc & 1) != 0
-            {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            }
-            else
-            {
-                crc >>= 1;
-            }
-            bit += 1;
-        }
-        table[idx] = crc;
-        idx += 1;
-    }
-    table
-}
-
-/// Computes IEEE CRC-32 sequentially over PNG chunk `tag` and `data` bytes.
-fn chunk_crc32(tag: &[u8; 4], data: &[u8]) -> u32
-{
-    let mut crc = 0xFFFF_FFFF_u32;
-    for &byte in tag.iter().chain(data.iter())
-    {
-        let lookup_idx = ((crc ^ u32::from(byte)) & 0xFF) as usize;
-        crc = (crc >> 8) ^ CRC32_TABLE[lookup_idx];
-    }
-    !crc
-}
-
-/// Appends one complete length-prefixed and CRC-tagged PNG chunk onto `out`.
-fn append_png_chunk(out: &mut Vec<u8>, tag: &[u8; 4], data: &[u8])
-{
-    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    out.extend_from_slice(tag);
-    out.extend_from_slice(data);
-    out.extend_from_slice(&chunk_crc32(tag, data).to_be_bytes());
-}
 
 /// Parsed APNG `fcTL` frame geometry, fractional delay, and dispose/blend operators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,10 +74,10 @@ pub struct ApngHeader
     pub canvas_h: u32,
 
     // Five `IHDR` trailing bytes (`bit_depth`, `color_type`, `compression`, `filter`, `interlace`).
-    ihdr_tail: [u8; 5],
+    pub(super) ihdr_tail: [u8; 5],
 
     // Pre-encoded palette and color metadata chunks (`PLTE`, `tRNS`, `sRGB`, `gAMA`, `cHRM`, etc.).
-    shared_ancillary_chunks: Vec<u8>,
+    pub(super) shared_ancillary_chunks: Vec<u8>,
 }
 
 /// Compressed raw APNG frame chunks ready for parallel worker PNG inflation.
@@ -162,23 +92,6 @@ pub struct RawApngPacket
 
     /// Raw compressed `IDAT` payloads (with any 4-byte `fdAT` sequence prefix already removed).
     pub compressed_idats: Vec<Vec<u8>>,
-}
-
-/// Independently inflated straight-RGBA patch awaiting ordered canvas compositing.
-#[derive(Debug, Clone)]
-pub struct DecodedApngPatch
-{
-    /// Zero-based animation frame index.
-    pub seq: usize,
-
-    /// Frame control metadata controlling canvas placement and blending.
-    pub fctl: FrameControl,
-
-    /// Normalized microsecond display duration (`>= CACHE_MIN_FRAME_DELAY_US`).
-    pub delay_us: u32,
-
-    /// Straight `[R, G, B, A]` pixels sized `fctl.width * fctl.height * 4`.
-    pub rgba: Vec<u8>,
 }
 
 /// Single parsed PNG chunk `(tag, data, raw_crc)`.
@@ -212,7 +125,7 @@ pub struct ApngPacketReader
     // Count of animated frames emitted so far (`0..expected_frames`).
     emitted_frames: usize,
 
-    // True when `IDAT` belongs to Frame 0 rather than a hidden static fallback thumbnail.
+    // Initial `fcTL` + `IDAT` chunk pair when `IDAT` belongs to Frame 0 rather than a hidden fallback.
     first_frame_pending: Option<(FrameControl, Vec<u8>)>,
 
     // Next unconsumed chunk peeked while delimiting `IDAT`/`fdAT` runs.
@@ -470,280 +383,6 @@ impl ApngPacketReader
         }
         read_chunk_opt(&self.path, &mut self.reader)
     }
-}
-
-/// Decodes one compressed APNG packet independently via `PngDecoder` into straight-RGBA pixels.
-pub fn decode_apng_packet(
-    path: &Path,
-    header: &ApngHeader,
-    packet: RawApngPacket,
-) -> Result<DecodedApngPatch, CacheError>
-{
-    let total_payload_bytes: usize = packet.compressed_idats.iter().map(Vec::len).sum();
-    let est_capacity = PNG_SIGNATURE.len()
-        + 12
-        + IHDR_DATA_LEN
-        + header.shared_ancillary_chunks.len()
-        + packet.compressed_idats.len() * 12
-        + total_payload_bytes
-        + 12;
-
-    let mut sub_png = Vec::with_capacity(est_capacity);
-    sub_png.extend_from_slice(&PNG_SIGNATURE);
-
-    let mut ihdr = [0_u8; IHDR_DATA_LEN];
-    ihdr[0..4].copy_from_slice(&packet.fctl.width.to_be_bytes());
-    ihdr[4..8].copy_from_slice(&packet.fctl.height.to_be_bytes());
-    ihdr[8..13].copy_from_slice(&header.ihdr_tail);
-    append_png_chunk(&mut sub_png, b"IHDR", &ihdr);
-
-    sub_png.extend_from_slice(&header.shared_ancillary_chunks);
-
-    for payload in &packet.compressed_idats
-    {
-        append_png_chunk(&mut sub_png, b"IDAT", payload);
-    }
-    append_png_chunk(&mut sub_png, b"IEND", &[]);
-
-    let decoder =
-        PngDecoder::new(Cursor::new(&sub_png)).map_err(|err| decode_err(path, err.to_string()))?;
-    let rgba = DynamicImage::from_decoder(decoder)
-        .map_err(|err| decode_err(path, err.to_string()))?
-        .into_rgba8();
-
-    let expected_len = checked_argb_byte_len(packet.fctl.width, packet.fctl.height)?;
-    let raw_bytes = rgba.into_raw();
-    if raw_bytes.len() != expected_len
-    {
-        return Err(decode_err(
-            path,
-            format!(
-                "Decoded APNG patch byte count {} did not match expected {}",
-                raw_bytes.len(),
-                expected_len
-            ),
-        ));
-    }
-
-    let delay_us = delay_us_from_fraction(packet.fctl.delay_num, packet.fctl.delay_den);
-    Ok(DecodedApngPatch {
-        seq: packet.seq,
-        fctl: packet.fctl,
-        delay_us,
-        rgba: raw_bytes,
-    })
-}
-
-/// Applies ordered APNG `DisposeOp` and `BlendOp` updates over a reusable full RGBA canvas.
-pub struct ApngCompositor
-{
-    // Full canvas pixel width.
-    canvas_w: u32,
-
-    // Full canvas pixel height.
-    canvas_h: u32,
-
-    // Active compositing canvas stored as straight RGBA pixels.
-    canvas: Vec<u8>,
-
-    // Region pixels backed up only when a frame declares `DISPOSE_PREVIOUS`.
-    saved_previous_patch: Vec<u8>,
-
-    // Rectangle and disposal rule left behind by the previously rendered frame.
-    pending_dispose: Option<FrameControl>,
-}
-
-impl ApngCompositor
-{
-    /// Creates an empty transparent canvas compositor sized `(canvas_w, canvas_h)`.
-    pub fn new(canvas_w: u32, canvas_h: u32) -> Result<Self, CacheError>
-    {
-        let byte_len = checked_argb_byte_len(canvas_w, canvas_h)?;
-        Ok(Self {
-            canvas_w,
-            canvas_h,
-            canvas: vec![0_u8; byte_len],
-            saved_previous_patch: Vec::new(),
-            pending_dispose: None,
-        })
-    }
-
-    /// Applies disposal for the previous frame, blends `patch`, and returns full-canvas `RawRgbaFrame`.
-    pub(crate) fn apply_patch(
-        &mut self,
-        patch: DecodedApngPatch,
-    ) -> Result<RawRgbaFrame, CacheError>
-    {
-        // W3C APNG requires executing the prior frame's disposal (e.g. `DISPOSE_BACKGROUND` clear)
-        // before snapshotting the canvas for an incoming frame marked `DISPOSE_PREVIOUS`
-        // (unlike `image-0.25.10`'s `ApngDecoder::mix_next_frame`, which snapshots prior to disposal).
-        if let Some(prev) = self.pending_dispose.take()
-        {
-            self.dispose_previous_region(prev);
-        }
-
-        let fc = patch.fctl;
-        if fc.dispose_op == DISPOSE_PREVIOUS
-        {
-            self.snapshot_region(fc);
-        }
-
-        self.blend_patch(fc, &patch.rgba)?;
-        self.pending_dispose = Some(fc);
-
-        Ok(RawRgbaFrame {
-            width: self.canvas_w,
-            height: self.canvas_h,
-            delay_us: patch.delay_us,
-            rgba: self.canvas.clone(),
-        })
-    }
-
-    /// Applies `patch` onto the canvas and returns `(delay_us, straight_rgba)` for external tests.
-    pub fn apply_patch_rgba(
-        &mut self,
-        patch: DecodedApngPatch,
-    ) -> Result<(u32, Vec<u8>), CacheError>
-    {
-        let raw = self.apply_patch(patch)?;
-        Ok((raw.delay_us, raw.rgba))
-    }
-
-    /// Clears or restores the previous frame's patch rectangle according to its `dispose_op`.
-    fn dispose_previous_region(&mut self, prev: FrameControl)
-    {
-        let stride = (self.canvas_w as usize) * BYTES_PER_PIXEL;
-        let row_bytes = (prev.width as usize) * BYTES_PER_PIXEL;
-        let x_byte = (prev.x_offset as usize) * BYTES_PER_PIXEL;
-
-        match prev.dispose_op
-        {
-            DISPOSE_NONE =>
-            {}
-            DISPOSE_BACKGROUND =>
-            {
-                for row in 0..prev.height as usize
-                {
-                    let start = ((prev.y_offset as usize) + row) * stride + x_byte;
-                    self.canvas[start..start + row_bytes].fill(0);
-                }
-            }
-            DISPOSE_PREVIOUS =>
-            {
-                if self.saved_previous_patch.len() < row_bytes * (prev.height as usize)
-                {
-                    return;
-                }
-                for row in 0..prev.height as usize
-                {
-                    let dst_start = ((prev.y_offset as usize) + row) * stride + x_byte;
-                    let src_start = row * row_bytes;
-                    self.canvas[dst_start..dst_start + row_bytes].copy_from_slice(
-                        &self.saved_previous_patch[src_start..src_start + row_bytes],
-                    );
-                }
-            }
-            _ =>
-            {}
-        }
-    }
-
-    /// Saves the existing canvas patch before drawing a frame marked with `DISPOSE_PREVIOUS`.
-    fn snapshot_region(&mut self, fc: FrameControl)
-    {
-        let stride = (self.canvas_w as usize) * BYTES_PER_PIXEL;
-        let row_bytes = (fc.width as usize) * BYTES_PER_PIXEL;
-        let total = row_bytes * (fc.height as usize);
-        self.saved_previous_patch.resize(total, 0);
-
-        for row in 0..fc.height as usize
-        {
-            let src_start =
-                ((fc.y_offset as usize) + row) * stride + (fc.x_offset as usize) * BYTES_PER_PIXEL;
-            let dst_start = row * row_bytes;
-            self.saved_previous_patch[dst_start..dst_start + row_bytes]
-                .copy_from_slice(&self.canvas[src_start..src_start + row_bytes]);
-        }
-    }
-
-    /// Writes `patch_rgba` into `(fc.x_offset, fc.y_offset, fc.width, fc.height)` via `blend_op`.
-    fn blend_patch(&mut self, fc: FrameControl, patch_rgba: &[u8]) -> Result<(), CacheError>
-    {
-        let canvas_stride = (self.canvas_w as usize) * BYTES_PER_PIXEL;
-        let row_bytes = (fc.width as usize) * BYTES_PER_PIXEL;
-        let x_byte = (fc.x_offset as usize) * BYTES_PER_PIXEL;
-
-        let expected = row_bytes * (fc.height as usize);
-        if patch_rgba.len() != expected
-        {
-            return Err(CacheError::Decode {
-                path: PathBuf::from("<apng-patch>"),
-                reason: format!("Patch size {} != expected {expected}", patch_rgba.len()),
-            });
-        }
-
-        if fc.blend_op == BLEND_SOURCE
-        {
-            for row in 0..fc.height as usize
-            {
-                let dst_start = ((fc.y_offset as usize) + row) * canvas_stride + x_byte;
-                let src_start = row * row_bytes;
-                self.canvas[dst_start..dst_start + row_bytes]
-                    .copy_from_slice(&patch_rgba[src_start..src_start + row_bytes]);
-            }
-            return Ok(());
-        }
-
-        if fc.blend_op == BLEND_OVER
-        {
-            for row in 0..fc.height as usize
-            {
-                let dst_start = ((fc.y_offset as usize) + row) * canvas_stride + x_byte;
-                let src_start = row * row_bytes;
-                let dst_row = &mut self.canvas[dst_start..dst_start + row_bytes];
-                let src_row = &patch_rgba[src_start..src_start + row_bytes];
-                blend_over_row(dst_row, src_row);
-            }
-            return Ok(());
-        }
-
-        Err(CacheError::Decode {
-            path: PathBuf::from("<apng-patch>"),
-            reason: format!("Unsupported APNG blend_op {}", fc.blend_op),
-        })
-    }
-}
-
-/// Blends straight-RGBA `src_row` over `dst_row` using `image::Rgba::blend` for exact parity.
-fn blend_over_row(dst_row: &mut [u8], src_row: &[u8])
-{
-    for (dst_px, src_px) in dst_row
-        .as_chunks_mut::<BYTES_PER_PIXEL>()
-        .0
-        .iter_mut()
-        .zip(src_row.as_chunks::<BYTES_PER_PIXEL>().0.iter())
-    {
-        match src_px[3]
-        {
-            0 =>
-            {}
-            255 => *dst_px = *src_px,
-            _ =>
-            {
-                let mut blended = Rgba(*dst_px);
-                blended.blend(&Rgba(*src_px));
-                *dst_px = blended.0;
-            }
-        }
-    }
-}
-
-/// Converts APNG `(delay_num, delay_den)` fractions directly into clamped microsecond delays.
-fn delay_us_from_fraction(delay_num: u16, delay_den: u16) -> u32
-{
-    let denom = if delay_den == 0 { 100 } else { delay_den };
-    let delay_us = (f64::from(delay_num) * 1_000_000.0) / f64::from(denom);
-    PlaybackClock::normalize_cache_delay_us(Some(delay_us))
 }
 
 /// Rewinds `reader` back to offset `0` so non-APNG static PNG decoding proceeds smoothly.

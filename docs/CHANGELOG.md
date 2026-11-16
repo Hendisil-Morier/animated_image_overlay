@@ -4,9 +4,17 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Added 1-second interval process CPU (`cpu=...%`, `host=...%` via `CLOCK_PROCESS_CPUTIME_ID`) and overall process RAM (`ram=...MiB` via `/proc/self/status` `VmRSS`) telemetry to `--stats` (`OverlayStats` and `StatsSnapshot` in `src/wayland/stats.rs`), and removed redundant `frame` cursor and post-decode `decode=done/warm` tags so `--stats` focuses on performance metrics.
+
 ### Performance
 
 - Parallelized per-frame APNG PNG decompression across the bounded worker pool (`src/decode/apng.rs`, `src/decode/codecs.rs`, `src/decode/pipeline.rs`, `src/decode/stream.rs`), splitting raw `fcTL`/`fdAT` packets sequentially via `ApngPacketReader`, inflating per-frame patches in parallel via `decode_apng_packet`, compositing blend and dispose operations in strict sequence via `ApngCompositor`, and prioritizing ready raw canvas encoding ahead of packet inflation to keep memory bounded and prevent pipeline stalls.
+
+### Documentation
+
+- Added [ADR-002](decisions/002-microsecond-timing-and-compositor-sync.md) and [ADR-003](decisions/003-parallel-apng-decode-pipeline.md) capturing microsecond timing, compositor subsurface synchronization, `--stats` telemetry, and bounded dual-stage parallel APNG decoding decisions, and linked them from `README.md` and `docs/ARCHITECTURE.md`.
 
 ## [0.3.2] - 2026-11-16
 
