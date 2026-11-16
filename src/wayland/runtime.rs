@@ -473,7 +473,7 @@ impl OverlayRuntime
         self.schedule_stats_timer_if_enabled();
     }
 
-    /// Captures live frame progress and RAM/display cache byte counts without blocking decoding.
+    /// Captures live CPU, overall RAM, decode, and cache byte counts without blocking decoding.
     fn collect_stats_snapshot(&self) -> StatsSnapshot
     {
         let (frame_count, decode_done, fits_source_ram) = self.cache.cache_profile();
@@ -483,7 +483,6 @@ impl OverlayRuntime
             .map_or((false, 0), OverlayScene::display_cache_stats);
 
         StatsSnapshot {
-            frame_index: self.playback.current_index(),
             frame_count,
             decode_done,
             paused: self.playback.is_paused(),
@@ -491,6 +490,9 @@ impl OverlayRuntime
             ram_used_bytes: self.cache.ram_used_bytes(),
             display_cache_active,
             display_cache_bytes,
+            cpu_time: OverlayStats::sample_cpu_time(),
+            logical_cpus: OverlayStats::logical_cpu_count(),
+            process_ram_bytes: OverlayStats::sample_process_ram_bytes(),
         }
     }
 

@@ -1,7 +1,10 @@
 //! Integration tests verifying triple-click edit toggling, pointer drags, scroll scaling,
 //! middle-click quit, hover fade timers, edit-mode keyboard shortcuts, and monitor selection.
 
-use std::time::{Duration, Instant};
+use std::{
+    hint::black_box,
+    time::{Duration, Instant},
+};
 
 use animated_image_widget::{
     config::OverlayState,
@@ -669,7 +672,6 @@ fn overlay_stats_formats_fps_cache_state_and_one_shot_decode_completion()
     let line1 = cold.take_interval_report(
         t0 + Duration::from_secs(1),
         StatsSnapshot {
-            frame_index: 5,
             frame_count: 20,
             decode_done: false,
             paused: false,
@@ -677,16 +679,21 @@ fn overlay_stats_formats_fps_cache_state_and_one_shot_decode_completion()
             ram_used_bytes: 10 * 1024 * 1024,
             display_cache_active: false,
             display_cache_bytes: 0,
+            cpu_time: Duration::from_millis(250),
+            logical_cpus: 16,
+            process_ram_bytes: 42 * 1024 * 1024,
         },
     );
-    assert!(line1.contains("fps=2.0 frame=6/20 skips=2 holds=1 stage_us=200/300"));
+    assert!(
+        line1.contains("fps=2.0 cpu=25.0% host=1.56% ram=42.0MiB skips=2 holds=1 stage_us=200/300")
+    );
     assert!(line1.contains("cache=ram(10.0MiB) disp=off decode=decoding(20f)"));
+    assert!(!line1.contains("frame="));
 
-    // Window counters reset cleanly on `take_interval_report`.
+    // Window counters and CPU baseline advance cleanly, and `decode=` omits once decoding finishes.
     let line2 = cold.take_interval_report(
         t0 + Duration::from_secs(2),
         StatsSnapshot {
-            frame_index: 5,
             frame_count: 180,
             decode_done: true,
             paused: true,
@@ -694,10 +701,17 @@ fn overlay_stats_formats_fps_cache_state_and_one_shot_decode_completion()
             ram_used_bytes: 0,
             display_cache_active: true,
             display_cache_bytes: 32 * 1024 * 1024,
+            cpu_time: Duration::from_millis(2_250),
+            logical_cpus: 16,
+            process_ram_bytes: 58 * 1024 * 1024,
         },
     );
-    assert!(line2.contains("fps=0.0 paused frame=6/180 skips=0 holds=0 stage_us=0/0"));
-    assert!(line2.contains("cache=lraw disp=32.0MiB decode=done(180f)"));
+    assert!(line2.contains(
+        "fps=0.0 paused cpu=200.0% host=12.50% ram=58.0MiB skips=0 holds=0 stage_us=0/0"
+    ));
+    assert!(line2.contains("cache=lraw disp=32.0MiB"));
+    assert!(!line2.contains("decode="));
+    assert!(!line2.contains("frame="));
 
     // Cold decode completion emits exactly once when `decode_done` flips true.
     assert!(
@@ -709,13 +723,12 @@ fn overlay_stats_formats_fps_cache_state_and_one_shot_decode_completion()
             .is_none()
     );
 
-    // Warm cache launches omit cold-decode completion and tag `decode=warm(...)`.
+    // Warm cache launches omit cold-decode completion and redundant `decode=warm` tag.
     let mut warm = OverlayStats::new(t0, true);
     assert!(warm.check_decode_completion(t0, 60, true).is_none());
     let warm_line = warm.format_report(
         Duration::from_secs(1),
         StatsSnapshot {
-            frame_index: 0,
             frame_count: 60,
             decode_done: true,
             paused: false,
@@ -723,7 +736,91 @@ fn overlay_stats_formats_fps_cache_state_and_one_shot_decode_completion()
             ram_used_bytes: 0,
             display_cache_active: false,
             display_cache_bytes: 0,
+            cpu_time: Duration::from_millis(7),
+            logical_cpus: 16,
+            process_ram_bytes: 24 * 1024 * 1024,
         },
     );
-    assert!(warm_line.contains("decode=warm(60f)"));
+    assert!(warm_line.contains("cpu=0.7% host=0.04% ram=24.0MiB"));
+    assert!(!warm_line.contains("decode="));
+}
+
+#[test]
+fn overlay_stats_tracks_cpu_baselines_and_degenerate_inputs()
+{
+    let t0 = Instant::now();
+    let mut stats = OverlayStats::with_cpu(t0, true, Duration::from_millis(500));
+
+    let anchored = stats.take_interval_report(
+        t0 + Duration::from_secs(1),
+        StatsSnapshot {
+            frame_count: 10,
+            decode_done: true,
+            paused: false,
+            fits_source_ram: true,
+            ram_used_bytes: 0,
+            display_cache_active: false,
+            display_cache_bytes: 0,
+            cpu_time: Duration::from_millis(900),
+            logical_cpus: 4,
+            process_ram_bytes: 16 * 1024 * 1024,
+        },
+    );
+    assert!(anchored.contains("cpu=40.0% host=10.00% ram=16.0MiB"));
+
+    // Regressed CPU counters and zero logical core counts saturate safely without NaN or underflow.
+    let safe = stats.format_report(
+        Duration::from_secs(1),
+        StatsSnapshot {
+            frame_count: 10,
+            decode_done: true,
+            paused: false,
+            fits_source_ram: true,
+            ram_used_bytes: 0,
+            display_cache_active: false,
+            display_cache_bytes: 0,
+            cpu_time: Duration::from_millis(200),
+            logical_cpus: 0,
+            process_ram_bytes: 0,
+        },
+    );
+    assert!(safe.contains("cpu=0.0% host=0.00% ram=0.0MiB"));
+
+    let zero_elapsed = stats.format_report(
+        Duration::ZERO,
+        StatsSnapshot {
+            frame_count: 10,
+            decode_done: true,
+            paused: false,
+            fits_source_ram: true,
+            ram_used_bytes: 0,
+            display_cache_active: false,
+            display_cache_bytes: 0,
+            cpu_time: Duration::from_millis(2_000),
+            logical_cpus: 8,
+            process_ram_bytes: 0,
+        },
+    );
+    assert!(zero_elapsed.contains("cpu=0.0% host=0.00%"));
+
+    // `/proc/self/status` `VmRSS` parser reads KiB accurately and tolerates missing/malformed data.
+    assert_eq!(
+        OverlayStats::parse_vm_rss_bytes("Name:\ta\nVmRSS:\t   26212 kB\nRssAnon:\t12 kB\n"),
+        Some(26_212 * 1024)
+    );
+    assert_eq!(OverlayStats::parse_vm_rss_bytes("VmSize:\t100 kB\n"), None);
+    assert_eq!(OverlayStats::parse_vm_rss_bytes("VmRSS:\tbad kB\n"), None);
+    assert!(OverlayStats::sample_process_ram_bytes() > 0);
+
+    // Live OS CPU clock remains monotonic across process work and reports at least 1 core.
+    assert!(OverlayStats::logical_cpu_count() >= 1);
+    let c0 = OverlayStats::sample_cpu_time();
+    let mut acc = 0_u64;
+    for i in 0..100_000_u64
+    {
+        acc = acc.wrapping_add(black_box(i));
+    }
+    black_box(acc);
+    let c1 = OverlayStats::sample_cpu_time();
+    assert!(c1 >= c0);
 }

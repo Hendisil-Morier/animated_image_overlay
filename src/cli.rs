@@ -150,10 +150,10 @@ pub struct CliArgs
     )]
     pub edit: bool,
 
-    /// Print periodic 1-second playback, decode, and cache performance stats to stdout.
+    /// Print periodic 1-second playback, CPU, RAM usage, staging, and cache stats to stdout.
     #[arg(
         long = "stats",
-        help = "Print 1-second playback FPS, skip/hold, staging, and cache stats to stdout."
+        help = "Print 1-second playback FPS, CPU%, RAM usage, skip/hold, staging, and cache stats to stdout."
     )]
     pub stats: bool,
 

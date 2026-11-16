@@ -1,7 +1,15 @@
-//! Periodic playback, staging latency, and cache memory telemetry for `--stats`.
+//! Periodic playback, CPU utilization, overall process RAM, staging latency, and cache telemetry for `--stats`.
 
-// Monotonic intervals for per-second FPS and staging duration measurement.
-use std::time::{Duration, Instant};
+// Cached logical CPU lookup, procfs RSS reads, and monotonic intervals for `--stats`.
+use std::{
+    fs,
+    sync::OnceLock,
+    thread,
+    time::{Duration, Instant},
+};
+
+// Safe `CLOCK_PROCESS_CPUTIME_ID` query for multi-thread process user and kernel CPU time.
+use rustix::time::{ClockId, clock_gettime};
 
 // Step-level skip and frontier-hold metrics from `PlaybackClock`.
 use crate::playback::PlaybackStep;
@@ -9,17 +17,14 @@ use crate::playback::PlaybackStep;
 /// Periodic reporting cadence in milliseconds when `--stats` is enabled.
 pub const STATS_INTERVAL_MS: u64 = 1_000;
 
-// IEC binary megabyte divisor for formatting cache usage in MiB.
+// IEC binary megabyte divisor for formatting cache and overall RAM usage in MiB.
 const BYTES_PER_MIB: f64 = 1024.0 * 1024.0;
 
-/// Instantaneous playback, decode, and cache memory state sampled at each stats report.
+/// Instantaneous decode, CPU, and memory state sampled at each stats report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatsSnapshot
 {
-    /// Zero-based index of the currently active frame.
-    pub frame_index: usize,
-
-    /// Total number of frames currently known by the frame store.
+    /// Total number of frames currently known by the frame store while decoding.
     pub frame_count: usize,
 
     /// Set once background decoding or warm cache verification has completed.
@@ -39,14 +44,26 @@ pub struct StatsSnapshot
 
     /// Total bytes currently held inside `DisplayFrameCache`.
     pub display_cache_bytes: usize,
+
+    /// Cumulative process CPU time (`user + kernel` across all threads) at snapshot capture.
+    pub cpu_time: Duration,
+
+    /// Logical CPU core count used to normalize host-wide CPU utilization.
+    pub logical_cpus: usize,
+
+    /// Overall process physical RAM usage (`VmRSS`) in bytes sampled at snapshot capture.
+    pub process_ram_bytes: usize,
 }
 
-/// Accumulates frame presentation, skip/hold, staging timing, and cold-decode metrics.
+/// Accumulates frame presentation, CPU usage, skip/hold, staging timing, and cold-decode metrics.
 #[derive(Debug, Clone)]
 pub struct OverlayStats
 {
     // Start instant of the active reporting interval.
     window_start: Instant,
+
+    // Cumulative process CPU time observed at `window_start`.
+    window_cpu_start: Duration,
 
     // Startup instant used to report total cold-decode completion duration.
     startup_instant: Instant,
@@ -78,11 +95,18 @@ pub struct OverlayStats
 
 impl OverlayStats
 {
-    /// Creates a new telemetry accumulator starting at `now` and recording cold/warm status.
+    /// Creates a new telemetry accumulator starting at `now` with a zero CPU baseline.
     pub fn new(now: Instant, initial_decode_done: bool) -> Self
+    {
+        Self::with_cpu(now, initial_decode_done, Duration::ZERO)
+    }
+
+    /// Creates a new telemetry accumulator starting at `now` and anchored at `initial_cpu_time`.
+    pub fn with_cpu(now: Instant, initial_decode_done: bool, initial_cpu_time: Duration) -> Self
     {
         Self {
             window_start: now,
+            window_cpu_start: initial_cpu_time,
             startup_instant: now,
             cold_decode_started: !initial_decode_done,
             cold_decode_reported: initial_decode_done,
@@ -93,6 +117,55 @@ impl OverlayStats
             stage_total_us: 0,
             stage_max_us: 0,
         }
+    }
+
+    /// Samples cumulative process CPU time (`user + kernel` across all threads) via `CLOCK_PROCESS_CPUTIME_ID`.
+    pub fn sample_cpu_time() -> Duration
+    {
+        let ts = clock_gettime(ClockId::ProcessCPUTime);
+        let secs = u64::try_from(ts.tv_sec).unwrap_or(0);
+        let nanos = u32::try_from(ts.tv_nsec).unwrap_or(0);
+        if nanos >= 1_000_000_000
+        {
+            return Duration::ZERO;
+        }
+        Duration::new(secs, nanos)
+    }
+
+    /// Returns the cached logical CPU count (`>= 1`) used to normalize host CPU utilization.
+    pub fn logical_cpu_count() -> usize
+    {
+        static LOGICAL_CPUS: OnceLock<usize> = OnceLock::new();
+        *LOGICAL_CPUS.get_or_init(|| {
+            thread::available_parallelism()
+                .map_or(1, usize::from)
+                .max(1)
+        })
+    }
+
+    /// Samples overall process physical RAM usage (`VmRSS`) in bytes from `/proc/self/status`.
+    pub fn sample_process_ram_bytes() -> usize
+    {
+        fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|text| Self::parse_vm_rss_bytes(&text))
+            .unwrap_or(0)
+    }
+
+    /// Parses the `VmRSS` entry in KiB from Linux `/proc/self/status` text into bytes.
+    pub fn parse_vm_rss_bytes(status: &str) -> Option<usize>
+    {
+        for line in status.lines()
+        {
+            let Some(rest) = line.strip_prefix("VmRSS:")
+            else
+            {
+                continue;
+            };
+            let kib: usize = rest.split_whitespace().next()?.parse().ok()?;
+            return kib.checked_mul(1024);
+        }
+        None
     }
 
     /// Records catch-up skips and frontier holds returned by one playback clock step.
@@ -153,7 +226,7 @@ impl OverlayStats
     {
         let elapsed = now.saturating_duration_since(self.window_start);
         let report = self.format_report(elapsed, snap);
-        self.reset_window(now);
+        self.reset_window(now, snap.cpu_time);
         report
     }
 
@@ -169,6 +242,7 @@ impl OverlayStats
         {
             0.0
         };
+        let (cpu_core_pct, cpu_host_pct) = self.cpu_utilization_pct(secs, snap);
         let stage_avg_us = self
             .stage_total_us
             .checked_div(self.stage_samples)
@@ -194,39 +268,46 @@ impl OverlayStats
             String::from("off")
         };
 
-        let decode_label = if !snap.decode_done
+        let decode_tag = if !snap.decode_done
         {
-            format!("decoding({}f)", snap.frame_count)
-        }
-        else if !self.cold_decode_started
-        {
-            format!("warm({}f)", snap.frame_count)
+            format!(" decode=decoding({}f)", snap.frame_count)
         }
         else
         {
-            format!("done({}f)", snap.frame_count)
+            String::new()
         };
 
+        let process_ram_mib = snap.process_ram_bytes as f64 / BYTES_PER_MIB;
         let state_tag = if snap.paused { " paused" } else { "" };
-        let display_idx = if snap.frame_count == 0
-        {
-            0
-        }
-        else
-        {
-            snap.frame_index.saturating_add(1).min(snap.frame_count)
-        };
 
         format!(
-            "[stats] fps={fps:.1}{state_tag} frame={display_idx}/{} skips={} holds={} stage_us={stage_avg_us}/{} cache={cache_label} disp={disp_label} decode={decode_label}",
-            snap.frame_count, self.catchup_skips, self.frontier_holds, self.stage_max_us
+            "[stats] fps={fps:.1}{state_tag} cpu={cpu_core_pct:.1}% host={cpu_host_pct:.2}% ram={process_ram_mib:.1}MiB skips={} holds={} stage_us={stage_avg_us}/{} cache={cache_label} disp={disp_label}{decode_tag}",
+            self.catchup_skips, self.frontier_holds, self.stage_max_us
         )
     }
 
-    /// Clears per-interval presentation, skip/hold, and staging latency accumulators.
-    fn reset_window(&mut self, now: Instant)
+    /// Computes `(core_pct, host_pct)` over `secs` from cumulative process CPU time deltas.
+    fn cpu_utilization_pct(&self, secs: f64, snap: StatsSnapshot) -> (f64, f64)
+    {
+        if secs <= 0.0
+        {
+            return (0.0, 0.0);
+        }
+
+        let cpu_delta_secs = snap
+            .cpu_time
+            .saturating_sub(self.window_cpu_start)
+            .as_secs_f64();
+        let cpu_core_pct = (cpu_delta_secs / secs) * 100.0;
+        let core_divisor = snap.logical_cpus.max(1) as f64;
+        (cpu_core_pct, cpu_core_pct / core_divisor)
+    }
+
+    /// Clears per-interval presentation, skip/hold, and staging accumulators and updates baselines.
+    fn reset_window(&mut self, now: Instant, cpu_time: Duration)
     {
         self.window_start = now;
+        self.window_cpu_start = cpu_time;
         self.presented_frames = 0;
         self.catchup_skips = 0;
         self.frontier_holds = 0;

@@ -132,9 +132,9 @@ pub fn run_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayE
         input: InputState::with_editing(cli.edit),
         playback: PlaybackClock::with_max_fps(cli.max_fps),
         start_instant: now,
-        stats: cli
-            .stats
-            .then(|| OverlayStats::new(now, initial_decode_done)),
+        stats: cli.stats.then(|| {
+            OverlayStats::with_cpu(now, initial_decode_done, OverlayStats::sample_cpu_time())
+        }),
         configured: false,
         frame_callback_pending: false,
         dirty_save: false,
