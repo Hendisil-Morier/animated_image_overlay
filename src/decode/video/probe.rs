@@ -44,6 +44,9 @@ pub(crate) struct VideoProbe
 
     /// Fallback per-frame microsecond delay derived from `avg_frame_rate` or `r_frame_rate`.
     pub(crate) fallback_delay_us: u32,
+
+    /// Hardware-accelerated GPU decoding backend passed to `ffmpeg -hwaccel <mode>`.
+    pub(crate) gpu: Option<String>,
 }
 
 impl VideoProbe
@@ -323,6 +326,7 @@ fn build_video_probe(path: &Path, output: FfprobeOutput) -> Result<VideoProbe, C
         display_height,
         estimated_frames,
         fallback_delay_us,
+        gpu: Some(String::from("auto")),
     })
 }
 

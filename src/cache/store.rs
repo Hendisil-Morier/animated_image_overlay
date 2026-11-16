@@ -109,14 +109,37 @@ impl FrameCache
         wakeup: Option<WakeupCallback>,
     ) -> Result<Self, OverlayError>
     {
+        Self::open_with_options(
+            image_path,
+            base_width,
+            max_frames,
+            ram_budget_bytes,
+            video_cache_bytes,
+            None,
+            wakeup,
+        )
+    }
+
+    /// Opens an overlay frame store with explicit RAM cap, video budget, and GPU decoding mode.
+    pub fn open_with_options(
+        image_path: &Path,
+        base_width: u32,
+        max_frames: usize,
+        ram_budget_bytes: usize,
+        video_cache_bytes: usize,
+        gpu_mode: Option<&str>,
+        wakeup: Option<WakeupCallback>,
+    ) -> Result<Self, OverlayError>
+    {
         let cache_dir = default_cache_dir()?;
-        Self::open_in_dir_with_video_budget(
+        Self::open_in_dir_with_options(
             image_path,
             base_width,
             max_frames,
             cache_dir,
             ram_budget_bytes,
             video_cache_bytes,
+            gpu_mode,
             DEFAULT_PRUNE_AGE_DAYS,
             wakeup,
         )
@@ -158,6 +181,33 @@ impl FrameCache
         wakeup: Option<WakeupCallback>,
     ) -> Result<Self, OverlayError>
     {
+        Self::open_in_dir_with_options(
+            image_path,
+            base_width,
+            max_frames,
+            cache_dir,
+            ram_budget_bytes,
+            video_cache_bytes,
+            None,
+            prune_age_days,
+            wakeup,
+        )
+    }
+
+    /// Opens a frame store with explicit cache directory, RAM cap, video budget, GPU mode, and prune age.
+    #[expect(clippy::too_many_arguments)]
+    pub fn open_in_dir_with_options(
+        image_path: &Path,
+        base_width: u32,
+        max_frames: usize,
+        cache_dir: impl Into<PathBuf>,
+        ram_budget_bytes: usize,
+        video_cache_bytes: usize,
+        gpu_mode: Option<&str>,
+        prune_age_days: u64,
+        wakeup: Option<WakeupCallback>,
+    ) -> Result<Self, OverlayError>
+    {
         let cache_dir = cache_dir.into();
         fs::create_dir_all(&cache_dir).map_err(|source| CacheError::Io {
             path: cache_dir.clone(),
@@ -175,7 +225,13 @@ impl FrameCache
             return Ok(cached);
         }
 
-        let source = open_source(image_path)?;
+        let mut source = open_source(image_path)?;
+        if let OpenedSource::Video(ref mut probe) = source
+            && let Some(gpu) = gpu_mode
+        {
+            probe.gpu = Some(gpu.to_string());
+        }
+
         if let OpenedSource::Video(probe) = &source
             && max_frames != 1
             && !probe.should_cache(base_width.max(1), max_frames, video_cache_bytes)

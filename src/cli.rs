@@ -2,7 +2,7 @@
 //!
 //! Preserves CLI flags (`FILE`, `-n`/`--max-frames`, `-w`/`--base-width`,
 //! `-m`/`--monitor`, `-s`/`--scale`, `-c`/`--cap`, `-f`/`--max-fps`,
-//! `--audio`, `--mute`, `--volume`, `-e`/`--edit`, `--stats`, and `-d`/`--debug`)
+//! `--audio`, `--mute`, `--volume`, `--gpu`, `-e`/`--edit`, `--stats`, and `-d`/`--debug`)
 //! while rejecting invalid numeric inputs and missing files.
 
 // Standard path and OS argument string types.
@@ -135,6 +135,15 @@ pub struct CliArgs
     /// Uncompressed MiB threshold below which short videos cache into `.lraw` (`0` forces live streaming, default: `512`).
     #[arg(skip = DEFAULT_VIDEO_CACHE_MB)]
     pub video_cache_mb: usize,
+
+    /// Hardware-accelerated GPU video decoding mode (`auto`, `none`/`off`, `vaapi`, `cuda`, `vulkan`, default: `auto`).
+    #[arg(
+        long = "gpu",
+        default_value = "auto",
+        value_name = "MODE",
+        help = "GPU video decoding backend (auto, none, vaapi, cuda, vulkan; default: auto)."
+    )]
+    pub gpu: String,
 
     /// Optional external audio file paired with images or overriding embedded video audio.
     #[arg(
@@ -338,6 +347,13 @@ impl CliArgs
         {
             return Err(OverlayError::CliValidation(String::from(
                 "--monitor must not be empty",
+            )));
+        }
+
+        if self.gpu.trim().is_empty()
+        {
+            return Err(OverlayError::CliValidation(String::from(
+                "--gpu must not be empty",
             )));
         }
 

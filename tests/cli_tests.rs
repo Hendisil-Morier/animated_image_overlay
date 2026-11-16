@@ -40,6 +40,7 @@ fn cli_applies_default_flags()
     assert_eq!(args.ram_cache_mb, 128);
     assert_eq!(args.display_cache_mb, 64);
     assert_eq!(args.video_cache_mb, 512);
+    assert_eq!(args.gpu, "auto");
     assert_eq!(args.audio, None);
     assert!(!args.mute);
     assert_eq!(args.volume, None);
@@ -79,6 +80,8 @@ fn cli_parses_explicit_flags()
         "0.75",
         "-c",
         "ram=256",
+        "--gpu",
+        "cuda",
         "-f",
         "120",
         "--edit",
@@ -99,6 +102,7 @@ fn cli_parses_explicit_flags()
     assert_eq!(args.monitor, "DP-2");
     assert_eq!(args.scale, Some(0.75));
     assert_eq!(args.ram_cache_mb, 256);
+    assert_eq!(args.gpu, "cuda");
     assert_eq!(args.max_fps, 120);
     assert_eq!(
         args.ram_cache_bytes().expect("explicit byte budget fits"),
@@ -108,15 +112,9 @@ fn cli_parses_explicit_flags()
     assert!(args.stats);
     assert!(args.debug);
 
-    let zero_outcome = CliArgs::parse_flags_from([
-        "overlay",
-        "sprite.webp",
-        "-c",
-        "ram=0",
-        "--max-fps",
-        "60",
-    ])
-    .expect("-c ram=0 and --max-fps 60 should parse");
+    let zero_outcome =
+        CliArgs::parse_flags_from(["overlay", "sprite.webp", "-c", "ram=0", "--max-fps", "60"])
+            .expect("-c ram=0 and --max-fps 60 should parse");
     assert!(matches!(
         zero_outcome,
         CliOutcome::Run(zero_args)
@@ -139,6 +137,8 @@ fn cli_rejects_invalid_base_width_and_scales()
         ["overlay", "img.png", "--scale", "inf"].as_slice(),
         ["overlay", "img.png", "--scale", "-inf"].as_slice(),
         ["overlay", "img.png", "--monitor", "   "].as_slice(),
+        ["overlay", "img.png", "--gpu", ""].as_slice(),
+        ["overlay", "img.png", "--gpu", "   "].as_slice(),
     ]
     {
         let err = CliArgs::parse_flags_from(bad_args.iter().copied())
@@ -182,6 +182,7 @@ fn cli_handles_help_flag_as_early_exit()
     for expected in [
         "--base-width",
         "--cap",
+        "--gpu",
         "--max-fps",
         "--edit",
         "--stats",
@@ -232,9 +233,15 @@ fn cli_parses_and_validates_cap_suboptions()
     assert_eq!(display_only.ram_cache_mb, 128);
     assert_eq!(display_only.display_cache_mb, 32);
 
-    let CliOutcome::Run(both) =
-        CliArgs::parse_flags_from(["overlay", "a.apng", "-c", "ram=256", "-c", "ram=0,display=128"])
-            .unwrap()
+    let CliOutcome::Run(both) = CliArgs::parse_flags_from([
+        "overlay",
+        "a.apng",
+        "-c",
+        "ram=256",
+        "-c",
+        "ram=0,display=128",
+    ])
+    .unwrap()
     else
     {
         panic!("expected Run");
@@ -318,4 +325,24 @@ fn cli_parses_and_validates_cap_suboptions()
     .expect_err("missing --audio file must fail validation");
     assert!(matches!(audio_err, OverlayError::MissingAudioFile(p) if p == missing_aud));
     let _ = fs::remove_file(&missing_img);
+}
+
+#[test]
+fn cli_parses_gpu_options()
+{
+    let CliOutcome::Run(none_args) =
+        CliArgs::parse_flags_from(["overlay", "video.mp4", "--gpu", "none"]).unwrap()
+    else
+    {
+        panic!("expected Run");
+    };
+    assert_eq!(none_args.gpu, "none");
+
+    let CliOutcome::Run(vaapi_args) =
+        CliArgs::parse_flags_from(["overlay", "video.mp4", "--gpu", "vaapi"]).unwrap()
+    else
+    {
+        panic!("expected Run");
+    };
+    assert_eq!(vaapi_args.gpu, "vaapi");
 }

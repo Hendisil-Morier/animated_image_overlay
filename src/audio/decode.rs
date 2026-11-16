@@ -271,10 +271,13 @@ pub(crate) fn decode_buffered_pcm(
 {
     let mut cmd = build_ffmpeg_audio_cmd(path, probe, sample_rate, channels, cap_duration_secs);
     let mut child = cmd.spawn().map_err(|err| map_spawn_err(path, err))?;
-    let mut stdout = child.stdout.take().ok_or_else(|| AudioError::DecodeFailed {
-        path: path.to_path_buf(),
-        reason: String::from("Failed capturing ffmpeg audio stdout stream"),
-    })?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AudioError::DecodeFailed {
+            path: path.to_path_buf(),
+            reason: String::from("Failed capturing ffmpeg audio stdout stream"),
+        })?;
     let _guard = AudioChildGuard { child: Some(child) };
 
     let mut samples = Vec::new();

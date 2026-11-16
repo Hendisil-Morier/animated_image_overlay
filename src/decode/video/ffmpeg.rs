@@ -155,16 +155,22 @@ pub(crate) fn open_video_frames(
     let map_spec = format!("0:{}", probe.video_stream_index);
 
     let mut cmd = Command::new("ffmpeg");
-    cmd.args(["-hide_banner", "-nostats", "-loglevel", "info", "-i"])
-        .arg(path)
-        .args([
-            "-map",
-            &map_spec,
-            "-vf",
-            &filter,
-            "-fps_mode",
-            "passthrough",
-        ]);
+    cmd.args(["-hide_banner", "-nostats", "-loglevel", "info"]);
+    if let Some(gpu) = probe.gpu.as_deref()
+        && !gpu.is_empty()
+        && gpu != "none"
+        && gpu != "off"
+    {
+        cmd.args(["-hwaccel", gpu]);
+    }
+    cmd.arg("-i").arg(path).args([
+        "-map",
+        &map_spec,
+        "-vf",
+        &filter,
+        "-fps_mode",
+        "passthrough",
+    ]);
     if max_frames > 0
     {
         cmd.args(["-frames:v", &max_frames.to_string()]);

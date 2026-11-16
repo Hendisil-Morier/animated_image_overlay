@@ -20,7 +20,7 @@ cargo build --release
 Run the overlay:
 
 ```bash
-./target/release/animated_image_widget FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE] [-c ram=<MB>,display=<MB>,video=<MB>]... [-f MAX_FPS] [--audio AUDIO_FILE] [--mute] [--volume VOLUME] [-e] [--stats] [-d]
+./target/release/animated_image_widget FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE] [-c ram=<MB>,display=<MB>,video=<MB>]... [-f MAX_FPS] [--gpu GPU_MODE] [--audio AUDIO_FILE] [--mute] [--volume VOLUME] [-e] [--stats] [-d]
 ```
 
 Options:
@@ -31,6 +31,7 @@ Options:
 - `-s`, `--scale`: Initial display scale, overriding any saved scale for that file.
 - `-c`, `--cap`: Repeatable comma-separated memory ceilings in MiB accepting `ram=<MB>`, `display=<MB>`, and `video=<MB>` individually or together (`-c ram=128,display=64,video=512`; defaults: `ram=128,display=64,video=512`). `ram` sets the RAM limit for keeping short animations unpacked in memory (`0` reads from disk); `display` sets display-resolution frame cache; `video` sets the threshold below which short videos cache to `.lraw` on disk while longer videos stream through an in-memory ring buffer.
 - `-f`, `--max-fps`: Maximum playback frame rate in FPS (`1..=1000`, default: `240`).
+- `--gpu`: Hardware-accelerated video decoding mode passed to ffmpeg (default: `auto`; `none` or `off` forces software CPU decoding, or explicit backends such as `cuda`, `vaapi`, `vdpau`, `qsv`, `vulkan`).
 - `--audio`: Companion audio track file (`MP3`, `OGG`, `WAV`, `FLAC`, `AAC`, etc.) played alongside the image or video overlay.
 - `--mute`: Start playback with audio muted.
 - `--volume`: Initial volume multiplier (`0.0..=1.0`, default: `1.0`).

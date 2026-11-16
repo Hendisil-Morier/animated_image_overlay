@@ -264,3 +264,90 @@ fn forced_live_video_ring_streams_wraps_across_loops_without_writing_lraw_and_st
 
     cache.stop();
 }
+
+#[test]
+fn video_decodes_cleanly_with_gpu_auto_and_gpu_none()
+{
+    let temp = TempDecodeDir::new("mp4_gpu_modes");
+    let mp4_path = temp.path().join("gpu_test.mp4");
+    generate_test_video(
+        &mp4_path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=0.3:size=120x60:rate=10",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+    );
+
+    // Decode with GPU auto detection (NVDEC / VA-API or fallback).
+    let auto_cache_dir = temp.path().join("cache_auto");
+    let mut auto_cache = FrameCache::open_in_dir_with_options(
+        &mp4_path,
+        120,
+        0,
+        &auto_cache_dir,
+        1024 * 1024,
+        1024 * 1024,
+        Some("auto"),
+        30,
+        None,
+    )
+    .expect("video should open cleanly with gpu auto");
+
+    let auto_dims = auto_cache.frame_dimensions();
+    assert_eq!(auto_dims, (120, 60));
+
+    // Decode with forced software CPU decoding (gpu = none).
+    let none_cache_dir = temp.path().join("cache_none");
+    let mut none_cache = FrameCache::open_in_dir_with_options(
+        &mp4_path,
+        120,
+        0,
+        &none_cache_dir,
+        1024 * 1024,
+        1024 * 1024,
+        Some("none"),
+        30,
+        None,
+    )
+    .expect("video should open cleanly with gpu none");
+
+    let none_dims = none_cache.frame_dimensions();
+    assert_eq!(none_dims, (120, 60));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while (!auto_cache.is_decode_done() || !none_cache.is_decode_done())
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        auto_cache.is_decode_done(),
+        "auto cache decoding did not complete in time"
+    );
+    assert!(
+        none_cache.is_decode_done(),
+        "none cache decoding did not complete in time"
+    );
+
+    // Both modes must report identical frame dimensions and delay profiles.
+    auto_cache.with_delays_us(|auto_delays, _| {
+        none_cache.with_delays_us(|none_delays, _| {
+            assert_eq!(auto_delays.len(), none_delays.len());
+            assert_eq!(auto_delays, none_delays);
+        });
+    });
+
+    let auto_f0 = auto_cache.frame_argb(0).expect("frame 0 should read");
+    let none_f0 = none_cache.frame_argb(0).expect("frame 0 should read");
+    assert_eq!(auto_f0.len(), none_f0.len());
+    assert_eq!(auto_f0.len(), 120 * 60 * 4);
+
+    auto_cache.stop();
+    none_cache.stop();
+}

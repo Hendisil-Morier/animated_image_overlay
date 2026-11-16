@@ -231,7 +231,9 @@ impl AudioSyncCore
     pub fn is_startup_ready(&self, now: Instant) -> bool
     {
         self.audio_ready.load(Ordering::Acquire)
-            || now.saturating_duration_since(self.start_instant).as_millis()
+            || now
+                .saturating_duration_since(self.start_instant)
+                .as_millis()
                 >= MAX_AUDIO_PREFILL_WAIT_MS
     }
 
@@ -259,8 +261,9 @@ impl AudioSyncCore
         }
 
         let rendered = self.total_rendered_frames.load(Ordering::Acquire);
-        let sample_us = ((rendered as u128).saturating_mul(1_000_000) / u128::from(self.sample_rate))
-            .min(u128::from(u64::MAX)) as u64;
+        let sample_us = ((rendered as u128).saturating_mul(1_000_000)
+            / u128::from(self.sample_rate))
+        .min(u128::from(u64::MAX)) as u64;
         let now_us = now
             .saturating_duration_since(self.start_instant)
             .as_micros()

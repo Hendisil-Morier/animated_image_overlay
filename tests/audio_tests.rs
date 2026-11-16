@@ -15,9 +15,7 @@ use std::{
 };
 
 use animated_image_widget::{
-    audio::{
-        AVSyncMode, AudioEngine, AudioProbe, AudioStorageMode, AudioSyncCore, AudioTrackData,
-    },
+    audio::{AVSyncMode, AudioEngine, AudioProbe, AudioStorageMode, AudioSyncCore, AudioTrackData},
     error::AudioError,
 };
 use temp_dir::TempDecodeDir;
@@ -73,7 +71,10 @@ fn audio_probe_detects_tracks_handles_silent_videos_and_selects_storage_mode()
             "aac",
         ],
     );
-    run_ffmpeg_fixture(&wav_path, &["-f", "lavfi", "-i", "sine=frequency=880:duration=0.25"]);
+    run_ffmpeg_fixture(
+        &wav_path,
+        &["-f", "lavfi", "-i", "sine=frequency=880:duration=0.25"],
+    );
 
     assert_eq!(
         AudioProbe::probe_optional(&silent_mp4).expect("silent mp4 should probe cleanly"),
@@ -86,11 +87,17 @@ fn audio_probe_detects_tracks_handles_silent_videos_and_selects_storage_mode()
 
     let probed_av = AudioProbe::probe_required(&av_mp4).expect("mp4 audio should probe");
     assert_eq!(probed_av.stream_index, 1);
-    assert_eq!(probed_av.storage_mode(48_000, 2, None), AudioStorageMode::Buffered);
+    assert_eq!(
+        probed_av.storage_mode(48_000, 2, None),
+        AudioStorageMode::Buffered
+    );
 
     let probed_wav = AudioProbe::probe_required(&wav_path).expect("wav audio should probe");
     assert_eq!(probed_wav.stream_index, 0);
-    assert_eq!(probed_wav.storage_mode(48_000, 2, None), AudioStorageMode::Buffered);
+    assert_eq!(
+        probed_wav.storage_mode(48_000, 2, None),
+        AudioStorageMode::Buffered
+    );
 
     let long_probe = AudioProbe {
         stream_index: 0,
@@ -128,7 +135,10 @@ fn audio_sync_core_mixes_samples_smoothly_and_maintains_monotonic_coupled_clock(
     // Render 480 frames (10 ms @ 48 kHz): click-free ramp rises smoothly from near 0 toward target gain 0.5.
     let mut out = vec![0.0_f32; 480 * 2];
     core.render_interleaved_f32(&mut out, t0 + Duration::from_millis(10));
-    assert!(out[0].abs() < 0.05, "first frame must fade in cleanly from 0");
+    assert!(
+        out[0].abs() < 0.05,
+        "first frame must fade in cleanly from 0"
+    );
     assert!((out[479 * 2] - (0.4 * 0.5)).abs() < 0.01);
 
     let media_after_first = core
