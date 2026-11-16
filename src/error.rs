@@ -190,7 +190,50 @@ pub enum WaylandError
     EventLoop(String),
 }
 
-/// Top-level error type unifying CLI validation, logging, config, cache, and Wayland failures.
+/// Errors returned by audio stream probing, `ffmpeg` PCM extraction, and `cpal` playback.
+#[derive(Debug, Error)]
+pub enum AudioError
+{
+    /// Required external media tool (`ffmpeg` or `ffprobe`) was missing from `PATH`.
+    #[error("Media audio decoding requires `{tool}` installed on PATH")]
+    UnavailableTool
+    {
+        /// Missing CLI executable name.
+        tool: &'static str,
+    },
+
+    /// Audio stream metadata probing failed or yielded malformed output.
+    #[error("Audio probe failed for {path}: {reason}")]
+    ProbeFailed
+    {
+        /// Audio or video container file path.
+        path: PathBuf,
+
+        /// Failure detail reported by probing.
+        reason: String,
+    },
+
+    /// Extracting PCM samples via `ffmpeg` failed or returned truncated data.
+    #[error("Audio decode failure for {path}: {reason}")]
+    DecodeFailed
+    {
+        /// Audio or video container file path.
+        path: PathBuf,
+
+        /// Human-readable decoder failure detail.
+        reason: String,
+    },
+
+    /// System audio output device or stream format is unavailable.
+    #[error("Audio output device unavailable: {0}")]
+    DeviceUnavailable(String),
+
+    /// Playback stream construction or runtime execution failed.
+    #[error("Audio stream failure: {0}")]
+    StreamFailed(String),
+}
+
+/// Top-level error type unifying CLI validation, logging, config, cache, audio, and Wayland failures.
 #[derive(Debug, Error)]
 pub enum OverlayError
 {
@@ -201,6 +244,10 @@ pub enum OverlayError
     /// Target image file does not exist or cannot be opened as a regular file.
     #[error("Input image file not found: {0}")]
     MissingInputFile(PathBuf),
+
+    /// Companion or override audio file does not exist or cannot be opened as a regular file.
+    #[error("Input audio file not found: {0}")]
+    MissingAudioFile(PathBuf),
 
     /// Failed to initialize console or non-blocking file diagnostics.
     #[error("Failed to initialize logging subsystem: {0}")]
@@ -213,6 +260,10 @@ pub enum OverlayError
     /// Cache or image decoding subsystem failure.
     #[error(transparent)]
     Cache(#[from] CacheError),
+
+    /// Audio probing, decoding, or playback subsystem failure.
+    #[error(transparent)]
+    Audio(#[from] AudioError),
 
     /// Wayland display, protocol, or event loop failure.
     #[error(transparent)]

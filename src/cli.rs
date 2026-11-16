@@ -27,6 +27,9 @@ const DEFAULT_RAM_CACHE_MB: usize = DEFAULT_RAM_CACHE_BUDGET_BYTES / (1024 * 102
 // Default RAM limit in MiB for caching display-resolution frames (`64 MiB`).
 const DEFAULT_DISPLAY_CACHE_MB: usize = 64;
 
+// Default uncompressed MiB threshold (`512 MiB`) below which short videos cache into `.lraw`.
+const DEFAULT_VIDEO_CACHE_MB: usize = 512;
+
 // Default target monitor selector when `--monitor` is omitted.
 const DEFAULT_MONITOR: &str = "0";
 
@@ -45,7 +48,9 @@ Edit mode keys:
   [ / ]                             Rotate 5 degrees counter-clockwise or clockwise
   0                                 Reset rotation to 0 degrees
   f / F                             Flip horizontally or vertically
-  Space                             Pause or resume animation
+  m                                 Toggle audio mute
+  , / . (< / >)                     Decrease or increase audio volume
+  Space                             Pause or resume playback
   q                                 Quit overlay";
 
 /// Outcome of parsing CLI flags before starting the Wayland runtime.
@@ -118,19 +123,44 @@ pub struct CliArgs
     )]
     pub ram_cache_mb: usize,
 
-    /// Comma-separated cache limits in MiB (`ram=<MB>,display=<MB>`), overriding defaults cleanly.
+    /// Comma-separated cache limits in MiB (`ram=<MB>,display=<MB>,video=<MB>`), overriding defaults cleanly.
     #[arg(
         short = 'c',
         long = "cap",
         value_name = "SPEC",
         action = ArgAction::Append,
-        help = "Cache MiB caps as key=value (repeatable; ram=<MB> overrides -r; e.g. -c ram=128,display=64; 0 disables)."
+        help = "Cache MiB caps as key=value (repeatable; ram=<MB> overrides -r; e.g. -c ram=128,display=64,video=512; 0 disables)."
     )]
     pub cap: Vec<String>,
 
     /// Resolved RAM limit in MiB for display-resolution frame caching (`0` disables, default: `64`).
     #[arg(skip = DEFAULT_DISPLAY_CACHE_MB)]
     pub display_cache_mb: usize,
+
+    /// Uncompressed MiB threshold below which short videos cache into `.lraw` (`0` forces live streaming, default: `512`).
+    #[arg(skip = DEFAULT_VIDEO_CACHE_MB)]
+    pub video_cache_mb: usize,
+
+    /// Optional external audio file paired with images or overriding embedded video audio.
+    #[arg(
+        long = "audio",
+        value_name = "AUDIO_FILE",
+        help = "Optional audio file paired with an image or overriding video audio."
+    )]
+    pub audio: Option<PathBuf>,
+
+    /// Start playback with audio muted.
+    #[arg(long = "mute", help = "Start with audio output muted.")]
+    pub mute: bool,
+
+    /// Optional initial audio gain in `0.0..=1.0`, overriding saved volume.
+    #[arg(
+        long = "volume",
+        value_name = "LEVEL",
+        allow_hyphen_values = true,
+        help = "Initial audio volume level in 0.0..=1.0 (overrides saved volume)."
+    )]
+    pub volume: Option<f64>,
 
     /// Maximum playback frame rate ceiling in FPS (`1..=1000`, default: `240`).
     #[arg(
@@ -218,18 +248,19 @@ impl CliArgs
         }
     }
 
-    /// Resolves `-c` / `--cap` (`ram=<MB>,display=<MB>`) entries onto `ram_cache_mb` and `display_cache_mb`.
+    /// Resolves `-c` / `--cap` (`ram=<MB>,display=<MB>,video=<MB>`) entries onto tier limits.
     fn apply_cap_overrides(&mut self) -> Result<(), OverlayError>
     {
         let mut ram_mb = self.ram_cache_mb;
         let mut display_mb = DEFAULT_DISPLAY_CACHE_MB;
+        let mut video_mb = DEFAULT_VIDEO_CACHE_MB;
 
         for spec in &self.cap
         {
             if spec.trim().is_empty()
             {
                 return Err(OverlayError::CliValidation(String::from(
-                    "--cap value must not be empty (expected ram=<MB> or display=<MB>)",
+                    "--cap value must not be empty (expected ram=<MB>, display=<MB>, or video=<MB>)",
                 )));
             }
             for item in spec.split(',')
@@ -238,12 +269,14 @@ impl CliArgs
                 {
                     (CapTarget::Ram, mb) => ram_mb = mb,
                     (CapTarget::Display, mb) => display_mb = mb,
+                    (CapTarget::Video, mb) => video_mb = mb,
                 }
             }
         }
 
         self.ram_cache_mb = ram_mb;
         self.display_cache_mb = display_mb;
+        self.video_cache_mb = video_mb;
         Ok(())
     }
 
@@ -267,7 +300,13 @@ impl CliArgs
         Self::mb_to_bytes(self.display_cache_mb, "--cap display")
     }
 
-    /// Verifies numeric constraints (`base_width >= 1`, `max_fps` in `1..=1000`, finite positive `scale`, valid cache caps, monitor).
+    /// Converts `video_cache_mb` (MiB) into bytes, rejecting overflowed counts.
+    pub fn video_cache_bytes(&self) -> Result<usize, OverlayError>
+    {
+        Self::mb_to_bytes(self.video_cache_mb, "--cap video")
+    }
+
+    /// Verifies numeric constraints (`base_width >= 1`, `max_fps` in `1..=1000`, finite positive `scale`, `volume` in `0..=1`, valid cache caps, monitor).
     pub fn validate_numbers(&self) -> Result<(), OverlayError>
     {
         if self.base_width < 1
@@ -292,6 +331,14 @@ impl CliArgs
             )));
         }
 
+        if let Some(volume) = self.volume
+            && (!volume.is_finite() || !(0.0..=1.0).contains(&volume))
+        {
+            return Err(OverlayError::CliValidation(String::from(
+                "--volume must be a finite value between 0.0 and 1.0",
+            )));
+        }
+
         if self.monitor.trim().is_empty()
         {
             return Err(OverlayError::CliValidation(String::from(
@@ -301,16 +348,23 @@ impl CliArgs
 
         let _ = self.ram_cache_bytes()?;
         let _ = self.display_cache_bytes()?;
+        let _ = self.video_cache_bytes()?;
 
         Ok(())
     }
 
-    /// Verifies that `self.file` points to an existing regular file on disk.
+    /// Verifies that `self.file` and optional `self.audio` point to existing regular files on disk.
     pub fn validate_file_exists(&self) -> Result<(), OverlayError>
     {
         if !self.file.is_file()
         {
             return Err(OverlayError::MissingInputFile(self.file.clone()));
+        }
+
+        if let Some(audio) = &self.audio
+            && !audio.is_file()
+        {
+            return Err(OverlayError::MissingAudioFile(audio.clone()));
         }
 
         Ok(())
@@ -325,9 +379,12 @@ enum CapTarget
 
     // Display-resolution frame cache budget (`-c display=<MB>`).
     Display,
+
+    // Maximum uncompressed MiB cached into `.lraw` for short video loops (`-c video=<MB>`).
+    Video,
 }
 
-/// Parses one `ram=<MB>` or `display=<MB>` entry cleanly with contextual validation errors.
+/// Parses one `ram=<MB>`, `display=<MB>`, or `video=<MB>` entry cleanly with validation errors.
 fn parse_cap_entry(entry: &str) -> Result<(CapTarget, usize), OverlayError>
 {
     let item = entry.trim();
@@ -335,7 +392,7 @@ fn parse_cap_entry(entry: &str) -> Result<(CapTarget, usize), OverlayError>
     else
     {
         return Err(OverlayError::CliValidation(format!(
-            "Invalid --cap entry '{item}' (expected ram=<MB> or display=<MB>)"
+            "Invalid --cap entry '{item}' (expected ram=<MB>, display=<MB>, or video=<MB>)"
         )));
     };
 
@@ -348,8 +405,9 @@ fn parse_cap_entry(entry: &str) -> Result<(CapTarget, usize), OverlayError>
     {
         "ram" => Ok((CapTarget::Ram, mb)),
         "display" => Ok((CapTarget::Display, mb)),
+        "video" => Ok((CapTarget::Video, mb)),
         _ => Err(OverlayError::CliValidation(format!(
-            "Unknown --cap key '{key}' (expected ram or display)"
+            "Unknown --cap key '{key}' (expected ram, display, or video)"
         ))),
     }
 }

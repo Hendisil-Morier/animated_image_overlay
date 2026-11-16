@@ -39,6 +39,10 @@ fn cli_applies_default_flags()
     assert_eq!(args.scale, None);
     assert_eq!(args.ram_cache_mb, 128);
     assert_eq!(args.display_cache_mb, 64);
+    assert_eq!(args.video_cache_mb, 512);
+    assert_eq!(args.audio, None);
+    assert!(!args.mute);
+    assert_eq!(args.volume, None);
     assert_eq!(args.max_fps, 240);
     assert_eq!(
         args.ram_cache_bytes().expect("default byte budget fits"),
@@ -48,6 +52,11 @@ fn cli_applies_default_flags()
         args.display_cache_bytes()
             .expect("default display byte budget fits"),
         64 * 1024 * 1024
+    );
+    assert_eq!(
+        args.video_cache_bytes()
+            .expect("default video byte budget fits"),
+        512 * 1024 * 1024
     );
     assert!(!args.edit);
     assert!(!args.stats);
@@ -257,6 +266,7 @@ fn cli_parses_and_validates_cap_suboptions()
         ["overlay", "a.apng", "-c", "unknown=10"].as_slice(),
         ["overlay", "a.apng", "-c", "display=abc"].as_slice(),
         ["overlay", "a.apng", "-c", "display=-1"].as_slice(),
+        ["overlay", "a.apng", "-c", "video=-1"].as_slice(),
         ["overlay", "a.apng", "-c", bad_overflow.as_str()].as_slice(),
     ]
     {
@@ -268,4 +278,46 @@ fn cli_parses_and_validates_cap_suboptions()
             "expected CliValidation for {bad:?}"
         );
     }
+
+    let CliOutcome::Run(audio_flags) = CliArgs::parse_flags_from([
+        "overlay",
+        "clip.mp4",
+        "--audio",
+        "track.mp3",
+        "--mute",
+        "--volume",
+        "0.35",
+        "-c",
+        "video=0",
+    ])
+    .expect("audio and video cache flags should parse")
+    else
+    {
+        panic!("expected Run");
+    };
+    assert_eq!(audio_flags.audio, Some(PathBuf::from("track.mp3")));
+    assert!(audio_flags.mute);
+    assert_eq!(audio_flags.volume, Some(0.35));
+    assert_eq!(audio_flags.video_cache_mb, 0);
+
+    for bad_vol in ["-0.1", "1.1", "nan", "inf"]
+    {
+        assert!(matches!(
+            CliArgs::parse_flags_from(["overlay", "clip.mp4", "--volume", bad_vol]),
+            Err(OverlayError::CliValidation(_))
+        ));
+    }
+
+    let missing_img = unique_temp_path("video_present.mp4");
+    fs::write(&missing_img, b"stub").expect("temp media file written");
+    let missing_aud = unique_temp_path("absent_audio.wav");
+    let audio_err = CliArgs::parse_and_validate_from([
+        "overlay",
+        missing_img.to_str().unwrap(),
+        "--audio",
+        missing_aud.to_str().unwrap(),
+    ])
+    .expect_err("missing --audio file must fail validation");
+    assert!(matches!(audio_err, OverlayError::MissingAudioFile(p) if p == missing_aud));
+    let _ = fs::remove_file(&missing_img);
 }

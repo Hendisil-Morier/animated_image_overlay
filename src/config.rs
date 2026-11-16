@@ -36,6 +36,9 @@ pub const DEFAULT_POS_Y: f64 = 100.0;
 /// Default scale multiplier when an image has no valid saved entry.
 pub const DEFAULT_SCALE: f64 = 0.6;
 
+/// Default audio gain multiplier applied when an entry has no persisted volume.
+pub const DEFAULT_AUDIO_VOLUME: f64 = 1.0;
+
 /// Persisted overlay placement, scale, and orientation relative to stored base dimensions.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct OverlayState
@@ -60,6 +63,45 @@ pub struct OverlayState
     /// Whether the rotated visual overlay is mirrored horizontally across its center axis.
     #[serde(default)]
     pub flipped: bool,
+}
+
+/// Persisted per-file audio playback volume (`0.0..=1.0`) and mute toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AudioPrefs
+{
+    /// Output gain multiplier clamped cleanly inside `0.0..=1.0`.
+    pub volume: f64,
+
+    /// Whether audio output starts muted for this media key.
+    pub muted: bool,
+}
+
+impl Default for AudioPrefs
+{
+    /// Returns unmuted playback at full nominal gain (`1.0`).
+    fn default() -> Self
+    {
+        Self {
+            volume: DEFAULT_AUDIO_VOLUME,
+            muted: false,
+        }
+    }
+}
+
+impl AudioPrefs
+{
+    /// Clamps finite `volume` into `0.0..=1.0`, falling back to `DEFAULT_AUDIO_VOLUME` otherwise.
+    pub fn clamped_volume(volume: f64) -> f64
+    {
+        if volume.is_finite()
+        {
+            volume.clamp(0.0, 1.0)
+        }
+        else
+        {
+            DEFAULT_AUDIO_VOLUME
+        }
+    }
 }
 
 impl Default for OverlayState
@@ -183,8 +225,47 @@ impl ConfigStore
         state
     }
 
-    /// Saves `state` under `key` while holding an exclusive `flock` on `<config>.lock`.
+    /// Loads saved audio volume and mute preferences for `key`, falling back to defaults.
+    pub fn load_audio_prefs(&self, key: &str) -> AudioPrefs
+    {
+        let mut prefs = AudioPrefs::default();
+        let data = self.read_config_map();
+
+        let Some(Value::Object(entry)) = data.get(key)
+        else
+        {
+            return prefs;
+        };
+
+        if let Some(volume) = entry
+            .get("volume")
+            .and_then(extract_finite_number)
+            .filter(|v| (0.0..=1.0).contains(v))
+        {
+            prefs.volume = volume;
+        }
+
+        if let Some(muted) = entry.get("muted").and_then(Value::as_bool)
+        {
+            prefs.muted = muted;
+        }
+
+        prefs
+    }
+
+    /// Saves `state` under `key` while holding an exclusive `flock` and preserving audio prefs.
     pub fn save_state_entry(&self, key: &str, state: OverlayState) -> Result<(), OverlayError>
+    {
+        self.save_overlay_and_audio(key, state, None)
+    }
+
+    /// Saves geometry `state` and optional `audio` prefs atomically under `<config>.lock`.
+    pub fn save_overlay_and_audio(
+        &self,
+        key: &str,
+        state: OverlayState,
+        audio: Option<AudioPrefs>,
+    ) -> Result<(), OverlayError>
     {
         let parent = self
             .path
@@ -219,11 +300,40 @@ impl ConfigStore
         let _lock_guard = ExclusiveLockGuard { file: lock_file };
 
         let mut data = self.read_config_map();
-        let state_value = serde_json::to_value(state).map_err(|source| ConfigError::Serialize {
-            path: self.path.clone(),
-            source,
-        })?;
-        data.insert(key.to_owned(), state_value);
+        let mut entry = match data.remove(key)
+        {
+            Some(Value::Object(existing)) => existing,
+            _ => Map::new(),
+        };
+
+        let Value::Object(geom_fields) =
+            serde_json::to_value(state).map_err(|source| ConfigError::Serialize {
+                path: self.path.clone(),
+                source,
+            })?
+        else
+        {
+            return Err(ConfigError::Serialize {
+                path: self.path.clone(),
+                source: serde::ser::Error::custom("expected JSON object for overlay state"),
+            }
+            .into());
+        };
+        for (field, value) in geom_fields
+        {
+            entry.insert(field, value);
+        }
+
+        if let Some(prefs) = audio
+        {
+            entry.insert(
+                String::from("volume"),
+                Value::from(AudioPrefs::clamped_volume(prefs.volume)),
+            );
+            entry.insert(String::from("muted"), Value::Bool(prefs.muted));
+        }
+
+        data.insert(key.to_owned(), Value::Object(entry));
 
         let bytes = serde_json::to_vec(&data).map_err(|source| ConfigError::Serialize {
             path: self.path.clone(),
@@ -242,6 +352,7 @@ impl ConfigStore
             scale = state.scale,
             rotation = state.rotation,
             flipped = state.flipped,
+            audio = ?audio,
             "Saved overlay state"
         );
         Ok(())

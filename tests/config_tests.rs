@@ -295,3 +295,53 @@ fn config_persists_arbitrary_rotations_and_recovers_invalid_values()
         serde_json::from_str(r#"{"x":10,"y":20,"scale":1.0,"rotation":"bad"}"#);
     assert!(invalid_serde.is_err());
 }
+
+#[test]
+fn config_persists_audio_prefs_alongside_overlay_state_without_clobbering()
+{
+    let temp = TempConfigDir::new("audio_prefs");
+    let cfg_path = temp.path().join("apng-overlay.json");
+    let store = ConfigStore::new(&cfg_path);
+
+    let key = "/videos/sample.mp4";
+    assert_eq!(
+        store.load_audio_prefs(key),
+        animated_image_widget::config::AudioPrefs::default()
+    );
+
+    let geom = OverlayState {
+        x: 50.0,
+        y: 80.0,
+        scale: 1.25,
+        rotation: 90.0,
+        flipped: true,
+    };
+    let prefs = animated_image_widget::config::AudioPrefs {
+        volume: 0.42,
+        muted: true,
+    };
+    store
+        .save_overlay_and_audio(key, geom, Some(prefs))
+        .expect("combined overlay + audio save should succeed");
+
+    assert_eq!(store.load_state_entry(key), geom);
+    assert_eq!(store.load_audio_prefs(key), prefs);
+
+    // Geometry-only save preserves persisted audio prefs cleanly.
+    let shifted = OverlayState { x: 120.0, ..geom };
+    store
+        .save_state_entry(key, shifted)
+        .expect("geometry-only save should succeed");
+    assert_eq!(store.load_state_entry(key), shifted);
+    assert_eq!(store.load_audio_prefs(key), prefs);
+
+    fs::write(
+        &cfg_path,
+        r#"{"/bad_audio.mp4":{"x":10,"y":20,"scale":1.0,"volume":1.5,"muted":"no"}}"#,
+    )
+    .expect("corrupt audio prefs fixture written");
+    assert_eq!(
+        store.load_audio_prefs("/bad_audio.mp4"),
+        animated_image_widget::config::AudioPrefs::default()
+    );
+}
