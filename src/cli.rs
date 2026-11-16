@@ -1,9 +1,9 @@
 //! Command-line argument parsing and validation for the Wayland image overlay.
 //!
-//! Preserves exact CLI parity with the Python launcher (`FILE`, `-n`/`--max-frames`,
-//! `-w`/`--base-width`, `-m`/`--monitor`, `-s`/`--scale`, `-r`/`--ram-cache-mb`, `-c`/`--cap`,
-//! `-f`/`--max-fps`, `-e`/`--edit`, `--stats`, and `-d`/`--debug`) while rejecting invalid numeric inputs
-//! and missing files.
+//! Preserves CLI flags (`FILE`, `-n`/`--max-frames`, `-w`/`--base-width`,
+//! `-m`/`--monitor`, `-s`/`--scale`, `-c`/`--cap`, `-f`/`--max-fps`,
+//! `--audio`, `--mute`, `--volume`, `-e`/`--edit`, `--stats`, and `-d`/`--debug`)
+//! while rejecting invalid numeric inputs and missing files.
 
 // Standard path and OS argument string types.
 use std::{ffi::OsString, path::PathBuf};
@@ -114,24 +114,19 @@ pub struct CliArgs
     )]
     pub scale: Option<f64>,
 
-    /// Memory limit in MiB for keeping animations unpacked in RAM (`0` = read from disk, default: `128`).
-    #[arg(
-        short = 'r',
-        long = "ram-cache-mb",
-        default_value_t = DEFAULT_RAM_CACHE_MB,
-        help = "RAM limit in MiB for source frames (overridden by -c ram=<MB>; 0 = read from disk)."
-    )]
-    pub ram_cache_mb: usize,
-
     /// Comma-separated cache limits in MiB (`ram=<MB>,display=<MB>,video=<MB>`), overriding defaults cleanly.
     #[arg(
         short = 'c',
         long = "cap",
         value_name = "SPEC",
         action = ArgAction::Append,
-        help = "Cache MiB caps as key=value (repeatable; ram=<MB> overrides -r; e.g. -c ram=128,display=64,video=512; 0 disables)."
+        help = "Cache MiB caps as key=value (repeatable; e.g. -c ram=128,display=64,video=512; 0 disables)."
     )]
     pub cap: Vec<String>,
+
+    /// Resolved RAM limit in MiB for keeping source frames in memory (`0` disables, default: `128`).
+    #[arg(skip = DEFAULT_RAM_CACHE_MB)]
+    pub ram_cache_mb: usize,
 
     /// Resolved RAM limit in MiB for display-resolution frame caching (`0` disables, default: `64`).
     #[arg(skip = DEFAULT_DISPLAY_CACHE_MB)]
@@ -251,7 +246,7 @@ impl CliArgs
     /// Resolves `-c` / `--cap` (`ram=<MB>,display=<MB>,video=<MB>`) entries onto tier limits.
     fn apply_cap_overrides(&mut self) -> Result<(), OverlayError>
     {
-        let mut ram_mb = self.ram_cache_mb;
+        let mut ram_mb = DEFAULT_RAM_CACHE_MB;
         let mut display_mb = DEFAULT_DISPLAY_CACHE_MB;
         let mut video_mb = DEFAULT_VIDEO_CACHE_MB;
 
@@ -291,7 +286,7 @@ impl CliArgs
     /// Converts `ram_cache_mb` (MiB) into bytes, rejecting overflowed counts.
     pub fn ram_cache_bytes(&self) -> Result<usize, OverlayError>
     {
-        Self::mb_to_bytes(self.ram_cache_mb, "--ram-cache-mb / --cap ram")
+        Self::mb_to_bytes(self.ram_cache_mb, "--cap ram")
     }
 
     /// Converts `display_cache_mb` (MiB) into bytes, rejecting overflowed counts.

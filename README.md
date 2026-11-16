@@ -20,7 +20,7 @@ cargo build --release
 Run the overlay:
 
 ```bash
-./target/release/animated_image_widget FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE] [-r RAM_CACHE_MB] [-c ram=<MB>,display=<MB>,video=<MB>]... [-f MAX_FPS] [--audio AUDIO_FILE] [--mute] [--volume VOLUME] [-e] [--stats] [-d]
+./target/release/animated_image_widget FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE] [-c ram=<MB>,display=<MB>,video=<MB>]... [-f MAX_FPS] [--audio AUDIO_FILE] [--mute] [--volume VOLUME] [-e] [--stats] [-d]
 ```
 
 Options:
@@ -29,8 +29,7 @@ Options:
 - `-w`, `--base-width`: Width in pixels used for stored cache frames (default: `500`; never upscales smaller files).
 - `-m`, `--monitor`: Target monitor index or connector name such as `DP-1` (default: `0`).
 - `-s`, `--scale`: Initial display scale, overriding any saved scale for that file.
-- `-r`, `--ram-cache-mb`: RAM limit in MiB for keeping short animations unpacked in memory; larger files read one frame at a time from disk (`0` always reads from disk; default: `128`; overridden if `-c ram=<MB>` is also given).
-- `-c`, `--cap`: Repeatable comma-separated memory ceilings in MiB accepting `ram=<MB>`, `display=<MB>`, and `video=<MB>` individually or together (`-c ram=128,display=64,video=512`; defaults: `ram=128,display=64,video=512`). Short videos within 1800 frames and under `video` budget cache to disk `.lraw`, while longer videos stream through an in-memory ring buffer.
+- `-c`, `--cap`: Repeatable comma-separated memory ceilings in MiB accepting `ram=<MB>`, `display=<MB>`, and `video=<MB>` individually or together (`-c ram=128,display=64,video=512`; defaults: `ram=128,display=64,video=512`). `ram` sets the RAM limit for keeping short animations unpacked in memory (`0` reads from disk); `display` sets display-resolution frame cache; `video` sets the threshold below which short videos cache to `.lraw` on disk while longer videos stream through an in-memory ring buffer.
 - `-f`, `--max-fps`: Maximum playback frame rate in FPS (`1..=1000`, default: `240`).
 - `--audio`: Companion audio track file (`MP3`, `OGG`, `WAV`, `FLAC`, `AAC`, etc.) played alongside the image or video overlay.
 - `--mute`: Start playback with audio muted.
@@ -77,7 +76,7 @@ Signals:
 
 - **`$XDG_CONFIG_HOME/apng-overlay.json` (default `~/.config/apng-overlay.json`)**: Stores `x`, `y`, `scale`, `rotation` (degrees in `[0.0, 360.0)`, using zero-copy compositor transforms on exact 90-degree multiples and smooth bilinear CPU resampling at fractional angles), `flipped` (`true` or `false`), and `audio` (`{"volume": 1.0, "muted": false}`) keyed by lexically normalized absolute file path (`. ` / `..` collapsed without dereferencing symlinks). Uses `500 ms` debounced saves serialized with an exclusive `flock` on `<config>.lock` and atomic temp-file replacement so concurrent instances preserve one another's entries.
 - **`$XDG_CACHE_HOME/apng-overlay/` (default `~/.cache/apng-overlay/`)**: Stores headerless `lz4_flex`-compressed premultiplied `ARGB8888` chunks (`.lraw`) and sidecar `.json` metadata (`delays_us` at microsecond precision with a `1_000 us` storage floor, clamped at runtime by `-f`/`--max-fps`) written strictly after `.lraw`. Frame 0 displays immediately while background workers process remaining frames in order (splitting APNG chunks for parallel PNG inflation and ordered canvas compositing alongside parallel `Lanczos3` scaling and LZ4 compression, flushing early frames 1 by 1 before 4-frame batching). Active cache entries refresh timestamps on hits, entries older than 30 days (`.json`, `.raw`, `.zraw`, `.lraw`) are pruned automatically at startup, and three caching tiers control playback performance:
-  - Source LRU (`-r` / `-c ram`, default `128 MiB`): Keeps decoded full-frame buffers in RAM for zero-copy streaming when the entire unpacked loop fits budget, switching dynamically to positional `.lraw` disk chunk streaming on larger files.
+  - Source LRU (`-c ram`, default `128 MiB`): Keeps decoded full-frame buffers in RAM for zero-copy streaming when the entire unpacked loop fits budget, switching dynamically to positional `.lraw` disk chunk streaming on larger files.
   - Display Cache (`-c display`, default `64 MiB`): Stores rendered fractional rotations and Lanczos3-downscaled oversized quarter-turn frames (`DisplayFrameCache` paired with compositor `set_buffer_transform`) at physical display resolution, dropping steady-state CPU from continuous LZ4 decompression (`~32%` core) to lightweight SHM `memcpy` (`< 1%` core) while bypassing caching cleanly on large overlays.
   - Video Disk Cache (`-c video`, default `512 MiB`): Short videos (`<= 1800` frames and uncompressed bytes within budget) cache sequentially to `.lraw` for zero-CPU looping. Videos exceeding this threshold or run with `-c video=0` stream via `LiveVideoRing`, keeping a bounded 16-frame lookahead in memory.
 - **`$XDG_CACHE_HOME/apng-overlay/logs/` (default `~/.cache/apng-overlay/logs/`)**: Daily rotating log files (`apng-overlay.*.log`, retaining up to 7 files).

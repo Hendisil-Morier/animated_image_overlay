@@ -77,8 +77,8 @@ fn cli_parses_explicit_flags()
         "DP-2",
         "-s",
         "0.75",
-        "-r",
-        "256",
+        "-c",
+        "ram=256",
         "-f",
         "120",
         "--edit",
@@ -111,12 +111,12 @@ fn cli_parses_explicit_flags()
     let zero_outcome = CliArgs::parse_flags_from([
         "overlay",
         "sprite.webp",
-        "--ram-cache-mb",
-        "0",
+        "-c",
+        "ram=0",
         "--max-fps",
         "60",
     ])
-    .expect("--ram-cache-mb 0 and --max-fps 60 should parse");
+    .expect("-c ram=0 and --max-fps 60 should parse");
     assert!(matches!(
         zero_outcome,
         CliOutcome::Run(zero_args)
@@ -127,12 +127,9 @@ fn cli_parses_explicit_flags()
 #[test]
 fn cli_rejects_invalid_base_width_and_scales()
 {
-    let max_mb = usize::MAX.to_string();
     for bad_args in [
         ["overlay", "img.png", "--base-width", "0"].as_slice(),
         ["overlay", "img.png", "--max-frames", "-1"].as_slice(),
-        ["overlay", "img.png", "--ram-cache-mb", "-1"].as_slice(),
-        ["overlay", "img.png", "--ram-cache-mb", max_mb.as_str()].as_slice(),
         ["overlay", "img.png", "--max-fps", "0"].as_slice(),
         ["overlay", "img.png", "-f", "1001"].as_slice(),
         ["overlay", "img.png", "-f", "-1"].as_slice(),
@@ -184,7 +181,6 @@ fn cli_handles_help_flag_as_early_exit()
 
     for expected in [
         "--base-width",
-        "--ram-cache-mb",
         "--cap",
         "--max-fps",
         "--edit",
@@ -196,7 +192,6 @@ fn cli_handles_help_flag_as_early_exit()
         "hjkl",
         "(12 px)",
         "+ / -",
-        "overrides -r",
         "repeatable",
         "r / R",
         "Rotate 90 degrees",
@@ -238,7 +233,7 @@ fn cli_parses_and_validates_cap_suboptions()
     assert_eq!(display_only.display_cache_mb, 32);
 
     let CliOutcome::Run(both) =
-        CliArgs::parse_flags_from(["overlay", "a.apng", "-r", "256", "-c", "ram=0,display=128"])
+        CliArgs::parse_flags_from(["overlay", "a.apng", "-c", "ram=256", "-c", "ram=0,display=128"])
             .unwrap()
     else
     {
@@ -259,15 +254,18 @@ fn cli_parses_and_validates_cap_suboptions()
 
     let max_mb = usize::MAX.to_string();
     let bad_overflow = format!("display={max_mb}");
+    let bad_ram_overflow = format!("ram={max_mb}");
     for bad in [
         ["overlay", "a.apng", "-c", ""].as_slice(),
         ["overlay", "a.apng", "-c", "ram"].as_slice(),
+        ["overlay", "a.apng", "-c", "ram=-1"].as_slice(),
         ["overlay", "a.apng", "-c", "ram=10,"].as_slice(),
         ["overlay", "a.apng", "-c", "unknown=10"].as_slice(),
         ["overlay", "a.apng", "-c", "display=abc"].as_slice(),
         ["overlay", "a.apng", "-c", "display=-1"].as_slice(),
         ["overlay", "a.apng", "-c", "video=-1"].as_slice(),
         ["overlay", "a.apng", "-c", bad_overflow.as_str()].as_slice(),
+        ["overlay", "a.apng", "-c", bad_ram_overflow.as_str()].as_slice(),
     ]
     {
         assert!(
