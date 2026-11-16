@@ -15,16 +15,15 @@ use std::{
 // Lanczos3 resizer instantiated per worker thread.
 use fast_image_resize::Resizer;
 
-// Single-open codec handles, frame encoding helpers, and domain errors.
+// Single-open codec handles, ordered parallel pipeline, frame encoding helpers, and domain errors.
 use super::{
     codecs::{
         FrameIterator, OpenedSource, apng_decoder_iter, decode_err, decode_image_reader,
         decode_single_frame_sync, decode_static_png, gif_reader_iter, io_err, open_source,
         with_webp_reader_frames,
     },
-    pixel::{
-        DecodedFirstFrame, EncodedFrame, RawRgbaFrame, encode_first_frame, encode_subsequent_frame,
-    },
+    pipeline::{PipelineParams, stream_remaining_frames},
+    pixel::{DecodedFirstFrame, EncodedFrame, RawRgbaFrame, encode_first_frame},
 };
 use crate::error::{CacheError, OverlayError};
 
@@ -216,39 +215,24 @@ fn stream_iter_frames<I>(
         }
     };
 
-    let mut sink_result = sink.on_first_frame(&first);
+    let sink_result = sink.on_first_frame(&first);
     let _ = first_tx.send(Ok(first));
-    if sink_result.is_err()
+    if sink_result.is_err() || cancel.load(Ordering::Acquire)
     {
         sink.on_finish(cancel.load(Ordering::Acquire), sink_result);
         return;
     }
 
-    let mut count = 1_usize;
-    for next_raw in iter
-    {
-        if cancel.load(Ordering::Acquire) || (max_frames > 0 && count >= max_frames)
-        {
-            break;
-        }
-
-        let step = next_raw
-            .and_then(|raw| encode_subsequent_frame(raw, base_width, &mut resizer))
-            .and_then(|encoded| sink.on_frame(encoded));
-        if let Err(err) = step
-        {
-            sink_result = Err(err);
-            break;
-        }
-
-        count += 1;
-        if count.is_multiple_of(30)
-        {
-            tracing::debug!(frames_decoded = count, path = %path.display(), "Decoded animation batch");
-        }
-    }
-
-    sink.on_finish(cancel.load(Ordering::Acquire), sink_result);
+    stream_remaining_frames(
+        iter,
+        PipelineParams {
+            base_width,
+            max_frames,
+            cancel,
+            path,
+        },
+        sink,
+    );
 }
 
 /// Sends a startup decoding error to the caller and shuts down the sink cleanly.

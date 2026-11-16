@@ -3,6 +3,9 @@
 // Container format detection and frame iterators across APNG, GIF, WebP, and still images.
 pub mod codecs;
 
+// Bounded, order-preserving parallel encode pool behind sequential decoding.
+mod pipeline;
+
 // Pixel buffer validation, straight RGBA -> premultiplied `ARGB8888`, and Lanczos scaling.
 pub mod pixel;
 

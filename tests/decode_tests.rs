@@ -116,6 +116,15 @@ fn build_synthetic_apng_2x2(frames_rgba: &[([u8; 4], u16)]) -> Vec<u8>
 
 fn build_synthetic_apng_2x2_fraction(frames_rgba: &[([u8; 4], u16, u16)]) -> Vec<u8>
 {
+    build_synthetic_apng_fraction(2, 2, frames_rgba)
+}
+
+fn build_synthetic_apng_fraction(
+    width: u32,
+    height: u32,
+    frames_rgba: &[([u8; 4], u16, u16)],
+) -> Vec<u8>
+{
     fn crc32(bytes: &[u8]) -> u32
     {
         let mut crc = 0xFFFF_FFFF_u32;
@@ -166,24 +175,27 @@ fn build_synthetic_apng_2x2_fraction(frames_rgba: &[([u8; 4], u16, u16)]) -> Vec
         out.extend_from_slice(&crc32(&crc_input).to_be_bytes());
     }
 
-    fn scanline_2x2(rgba: [u8; 4]) -> Vec<u8>
+    fn scanline_solid(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8>
     {
-        let mut raw = Vec::with_capacity(18);
-        for _row in 0..2
+        let row_bytes = 1 + (width as usize) * 4;
+        let mut raw = Vec::with_capacity(row_bytes * (height as usize));
+        for _row in 0..height
         {
             raw.push(0); // filter byte 0
-            raw.extend_from_slice(&rgba);
-            raw.extend_from_slice(&rgba);
+            for _col in 0..width
+            {
+                raw.extend_from_slice(&rgba);
+            }
         }
         zlib_stored(&raw)
     }
 
     let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 
-    // IHDR: 2x2, 8-bit RGBA (color type 6)
+    // IHDR: width x height, 8-bit RGBA (color type 6)
     let mut ihdr = Vec::new();
-    ihdr.extend_from_slice(&2_u32.to_be_bytes());
-    ihdr.extend_from_slice(&2_u32.to_be_bytes());
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
     ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
     push_chunk(&mut out, b"IHDR", &ihdr);
 
@@ -199,8 +211,8 @@ fn build_synthetic_apng_2x2_fraction(frames_rgba: &[([u8; 4], u16, u16)]) -> Vec
         let mut fctl = Vec::with_capacity(26);
         fctl.extend_from_slice(&seq.to_be_bytes());
         seq += 1;
-        fctl.extend_from_slice(&2_u32.to_be_bytes()); // width
-        fctl.extend_from_slice(&2_u32.to_be_bytes()); // height
+        fctl.extend_from_slice(&width.to_be_bytes()); // width
+        fctl.extend_from_slice(&height.to_be_bytes()); // height
         fctl.extend_from_slice(&0_u32.to_be_bytes()); // x_offset
         fctl.extend_from_slice(&0_u32.to_be_bytes()); // y_offset
         fctl.extend_from_slice(&delay_num.to_be_bytes()); // delay_num
@@ -209,7 +221,7 @@ fn build_synthetic_apng_2x2_fraction(frames_rgba: &[([u8; 4], u16, u16)]) -> Vec
         fctl.push(0); // blend_op = source
         push_chunk(&mut out, b"fcTL", &fctl);
 
-        let compressed = scanline_2x2(rgba);
+        let compressed = scanline_solid(width, height, rgba);
         if idx == 0
         {
             push_chunk(&mut out, b"IDAT", &compressed);
@@ -796,4 +808,193 @@ fn decode_preserves_120fps_and_240fps_apng_microsecond_delays()
             expected_us,
         );
     }
+}
+
+#[test]
+fn decode_preserves_frame_order_across_parallel_workers()
+{
+    let temp = TempDecodeDir::new("parallel_order");
+    let frame_spec: Vec<([u8; 4], u16, u16)> = (0..20_u8)
+        .map(|i| ([i * 10, i * 5 + 20, 250 - i * 8, 255], 1, 120))
+        .collect();
+    let apng_path = temp.path().join("ordered_20_120fps.apng");
+    fs::write(
+        &apng_path,
+        build_synthetic_apng_fraction(64, 64, &frame_spec),
+    )
+    .unwrap();
+
+    let rec_state = Arc::new(Mutex::new(RecordedStream::default()));
+    let (first, worker) = FrameDecoder::open_stream(
+        &apng_path,
+        32,
+        0,
+        Arc::new(AtomicBool::new(false)),
+        Box::new(RecordingSink {
+            state: Arc::clone(&rec_state),
+        }),
+    )
+    .expect("20-frame downscaled APNG should decode cleanly");
+    if let Some(handle) = worker
+    {
+        handle.join().unwrap();
+    }
+
+    assert_eq!((first.width, first.height), (32, 32));
+    let rec = rec_state.lock().unwrap();
+    assert!(rec.finished);
+    assert!(!rec.cancelled);
+    assert!(rec.finish_err.is_none());
+    assert_eq!(rec.frames.len(), 20);
+    assert_eq!(rec.delays_us, vec![8_333; 20]);
+
+    for (idx, payload) in rec.frames.iter().enumerate()
+    {
+        let raw = decompress_size_prepended(payload).unwrap();
+        assert_eq!(raw.len(), 32 * 32 * 4);
+        let [r, g, b, a] = frame_spec[idx].0;
+        assert_eq!(&raw[0..4], &[b, g, r, a], "frame {idx} out of order");
+    }
+}
+
+#[test]
+fn decode_stops_pipeline_cleanly_on_midstream_cancel_and_sink_error()
+{
+    let temp = TempDecodeDir::new("midstream_stop");
+    let gif_path = temp.path().join("many.gif");
+    let gif_frames: Vec<_> = (0..25_u8)
+        .map(|idx| {
+            ImgFrame::from_parts(
+                RgbaImage::from_pixel(32, 32, image::Rgba([idx * 10, 40, 80, 255])),
+                0,
+                0,
+                Delay::from_numer_denom_ms(20, 1),
+            )
+        })
+        .collect();
+    GifEncoder::new(File::create(&gif_path).unwrap())
+        .encode_frames(gif_frames)
+        .unwrap();
+
+    // 1. Mid-stream cancellation after frame 3 finishes cleanly without stalling.
+    struct CancelOnThirdFrame
+    {
+        inner: RecordingSink,
+        cancel: Arc<AtomicBool>,
+        seen: usize,
+    }
+
+    impl FrameStreamSink for CancelOnThirdFrame
+    {
+        fn on_first_frame(&mut self, frame: &DecodedFirstFrame) -> Result<(), CacheError>
+        {
+            self.seen = 1;
+            self.inner.on_first_frame(frame)
+        }
+
+        fn on_frame(&mut self, frame: EncodedFrame) -> Result<(), CacheError>
+        {
+            self.inner.on_frame(frame)?;
+            self.seen += 1;
+            if self.seen >= 3
+            {
+                self.cancel.store(true, Ordering::Release);
+            }
+            Ok(())
+        }
+
+        fn on_finish(self: Box<Self>, cancelled: bool, result: Result<(), CacheError>)
+        {
+            Box::new(self.inner).on_finish(cancelled, result);
+        }
+    }
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_rec = Arc::new(Mutex::new(RecordedStream::default()));
+    let (_first, cancel_worker) = FrameDecoder::open_stream(
+        &gif_path,
+        16,
+        0,
+        Arc::clone(&cancel),
+        Box::new(CancelOnThirdFrame {
+            inner: RecordingSink {
+                state: Arc::clone(&cancel_rec),
+            },
+            cancel,
+            seen: 0,
+        }),
+    )
+    .unwrap();
+    if let Some(handle) = cancel_worker
+    {
+        handle.join().unwrap();
+    }
+    let cancel_guard = cancel_rec.lock().unwrap();
+    assert!(cancel_guard.finished);
+    assert!(cancel_guard.cancelled);
+    assert!(cancel_guard.finish_err.is_none());
+    assert!(cancel_guard.frames.len() < 25);
+
+    // 2. Mid-stream sink write failure aborts reader/workers cleanly and surfaces the error.
+    struct ErrorOnThirdFrame
+    {
+        inner: RecordingSink,
+        seen: usize,
+    }
+
+    impl FrameStreamSink for ErrorOnThirdFrame
+    {
+        fn on_first_frame(&mut self, frame: &DecodedFirstFrame) -> Result<(), CacheError>
+        {
+            self.seen = 1;
+            self.inner.on_first_frame(frame)
+        }
+
+        fn on_frame(&mut self, frame: EncodedFrame) -> Result<(), CacheError>
+        {
+            self.seen += 1;
+            if self.seen == 3
+            {
+                return Err(CacheError::Codec {
+                    path: PathBuf::from("synthetic.gif"),
+                    frame_index: 2,
+                    reason: String::from("Injected sink failure"),
+                });
+            }
+            self.inner.on_frame(frame)
+        }
+
+        fn on_finish(self: Box<Self>, cancelled: bool, result: Result<(), CacheError>)
+        {
+            Box::new(self.inner).on_finish(cancelled, result);
+        }
+    }
+
+    let err_rec = Arc::new(Mutex::new(RecordedStream::default()));
+    let (_first2, err_worker) = FrameDecoder::open_stream(
+        &gif_path,
+        16,
+        0,
+        Arc::new(AtomicBool::new(false)),
+        Box::new(ErrorOnThirdFrame {
+            inner: RecordingSink {
+                state: Arc::clone(&err_rec),
+            },
+            seen: 0,
+        }),
+    )
+    .unwrap();
+    if let Some(handle) = err_worker
+    {
+        handle.join().unwrap();
+    }
+    let err_guard = err_rec.lock().unwrap();
+    assert!(err_guard.finished);
+    assert!(!err_guard.cancelled);
+    assert!(
+        err_guard
+            .finish_err
+            .as_deref()
+            .is_some_and(|msg| msg.contains("Injected sink failure"))
+    );
 }
