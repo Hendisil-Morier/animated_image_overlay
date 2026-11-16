@@ -18,6 +18,8 @@ use image::{
 // Animated and static WebP decoding backed by `libwebp`.
 use webp_animation::{ColorMode, Decoder as WebpDecoder, DecoderOptions as WebpOptions};
 
+// Parallel-capable APNG chunk splitter, patch decoder, and sequential canvas compositor.
+use super::apng::{ApngCompositor, ApngHeader, ApngPacketReader, decode_apng_packet};
 // Shared raw frame struct, cache error mappings, and normalized frame delay clamping.
 use super::pixel::{DecodedFirstFrame, RawRgbaFrame, encode_first_frame};
 use crate::{error::CacheError, playback::PlaybackClock};
@@ -26,7 +28,7 @@ use crate::{error::CacheError, playback::PlaybackClock};
 pub(crate) enum OpenedSource
 {
     /// PNG container verified to carry an `acTL` animation control chunk.
-    Apng(Box<PngDecoder<BufReader<File>>>),
+    Apng(Box<ApngPacketReader>),
 
     /// Static PNG already parsed past header chunks without an `acTL` sequence.
     StaticPng(Box<PngDecoder<BufReader<File>>>),
@@ -63,15 +65,15 @@ pub(crate) fn open_source(path: &Path) -> Result<OpenedSource, CacheError>
         Some(ImageFormat::Png) =>
         {
             let buf = rewind_reader(path, reader)?;
-            let png = PngDecoder::new(buf).map_err(|err| decode_err(path, err.to_string()))?;
-
-            if png.is_apng().unwrap_or(false)
+            match ApngPacketReader::try_open(path, buf)?
             {
-                Ok(OpenedSource::Apng(Box::new(png)))
-            }
-            else
-            {
-                Ok(OpenedSource::StaticPng(Box::new(png)))
+                Ok(apng) => Ok(OpenedSource::Apng(Box::new(apng))),
+                Err(static_buf) =>
+                {
+                    let png = PngDecoder::new(static_buf)
+                        .map_err(|err| decode_err(path, err.to_string()))?;
+                    Ok(OpenedSource::StaticPng(Box::new(png)))
+                }
             }
         }
         Some(ImageFormat::Gif) => Ok(OpenedSource::Gif(rewind_reader(path, reader)?)),
@@ -90,7 +92,11 @@ pub(crate) fn decode_single_frame_sync(
     let mut resizer = Resizer::new();
     let raw = match source
     {
-        OpenedSource::Apng(png) => apng_decoder_iter(path, *png)?.next(),
+        OpenedSource::Apng(mut reader) =>
+        {
+            let (raw, _, _) = decode_apng_first_frame(path, &mut reader)?;
+            Some(Ok(raw))
+        }
         OpenedSource::Gif(reader) => gif_reader_iter(path, reader)?.next(),
         OpenedSource::Webp(reader) =>
         {
@@ -105,19 +111,20 @@ pub(crate) fn decode_single_frame_sync(
     encode_first_frame(frame, base_width, &mut resizer)
 }
 
-/// Builds a streaming APNG frame iterator from an already-opened `PngDecoder`.
-pub(crate) fn apng_decoder_iter<'a>(
-    path: &'a Path,
-    png: PngDecoder<BufReader<File>>,
-) -> Result<FrameIterator<'a>, CacheError>
+/// Decodes APNG frame 0 synchronously and prepares the stateful canvas compositor for `1..`.
+pub(crate) fn decode_apng_first_frame(
+    path: &Path,
+    reader: &mut ApngPacketReader,
+) -> Result<(RawRgbaFrame, ApngHeader, ApngCompositor), CacheError>
 {
-    let apng = png
-        .apng()
-        .map_err(|err| decode_err(path, err.to_string()))?;
-
-    Ok(Box::new(
-        apng.into_frames().map(|res| map_image_frame(path, res)),
-    ))
+    let header = reader.header();
+    let packet = reader
+        .next_packet()?
+        .ok_or_else(|| decode_err(path, String::from("Image contained zero frames")))?;
+    let patch = decode_apng_packet(path, &header, packet)?;
+    let mut compositor = ApngCompositor::new(header.canvas_w, header.canvas_h)?;
+    let raw = compositor.apply_patch(patch)?;
+    Ok((raw, header, compositor))
 }
 
 /// Builds a streaming GIF frame iterator from an already-opened buffered reader.

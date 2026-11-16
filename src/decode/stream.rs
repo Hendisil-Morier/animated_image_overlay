@@ -15,14 +15,15 @@ use std::{
 // Lanczos3 resizer instantiated per worker thread.
 use fast_image_resize::Resizer;
 
-// Single-open codec handles, ordered parallel pipeline, frame encoding helpers, and domain errors.
+// Single-open codec handles, APNG reader, ordered parallel pipelines, and domain errors.
 use super::{
+    apng::ApngPacketReader,
     codecs::{
-        FrameIterator, OpenedSource, apng_decoder_iter, decode_err, decode_image_reader,
+        FrameIterator, OpenedSource, decode_apng_first_frame, decode_err, decode_image_reader,
         decode_single_frame_sync, decode_static_png, gif_reader_iter, io_err, open_source,
         with_webp_reader_frames,
     },
-    pipeline::{PipelineParams, stream_remaining_frames},
+    pipeline::{PipelineParams, stream_apng_remaining, stream_remaining_frames},
     pixel::{DecodedFirstFrame, EncodedFrame, RawRgbaFrame, encode_first_frame},
 };
 use crate::error::{CacheError, OverlayError};
@@ -128,14 +129,8 @@ fn run_worker_decoder(
 {
     match source
     {
-        OpenedSource::Apng(png) => stream_iter_result(
-            path,
-            apng_decoder_iter(path, *png),
-            base_width,
-            max_frames,
-            cancel,
-            first_tx,
-            sink,
+        OpenedSource::Apng(reader) => stream_apng_source(
+            path, *reader, base_width, max_frames, cancel, first_tx, sink,
         ),
         OpenedSource::Gif(reader) => stream_iter_result(
             path,
@@ -170,6 +165,47 @@ fn run_worker_decoder(
     }
 }
 
+/// Streams APNG frame 0 synchronously, then parallelizes remaining PNG chunks and RGBA encoding.
+fn stream_apng_source(
+    path: &Path,
+    mut reader: ApngPacketReader,
+    base_width: u32,
+    max_frames: usize,
+    cancel: &AtomicBool,
+    first_tx: &mpsc::SyncSender<Result<DecodedFirstFrame, CacheError>>,
+    sink: Box<dyn FrameStreamSink>,
+)
+{
+    let (raw, header, compositor) = match decode_apng_first_frame(path, &mut reader)
+    {
+        Ok(parts) => parts,
+        Err(err) =>
+        {
+            abort_startup_error(err, cancel, first_tx, sink);
+            return;
+        }
+    };
+
+    let Some(sink) = start_stream_with_first_raw(Ok(raw), base_width, cancel, first_tx, sink)
+    else
+    {
+        return;
+    };
+
+    stream_apng_remaining(
+        reader,
+        header,
+        compositor,
+        PipelineParams {
+            base_width,
+            max_frames,
+            cancel,
+            path,
+        },
+        sink,
+    );
+}
+
 /// Streams from an opened container iterator or reports open failure cleanly.
 fn stream_iter_result<'a>(
     path: &Path,
@@ -191,7 +227,7 @@ fn stream_iter_result<'a>(
     }
 }
 
-/// Streams frame 0 and remaining frames uniformly across APNG, GIF, and WebP iterators.
+/// Streams frame 0 and remaining frames uniformly across GIF, WebP, and fallback iterators.
 fn stream_iter_frames<I>(
     path: &Path,
     mut iter: I,
@@ -199,29 +235,16 @@ fn stream_iter_frames<I>(
     max_frames: usize,
     cancel: &AtomicBool,
     first_tx: &mpsc::SyncSender<Result<DecodedFirstFrame, CacheError>>,
-    mut sink: Box<dyn FrameStreamSink>,
+    sink: Box<dyn FrameStreamSink>,
 ) where
     I: Iterator<Item = Result<RawRgbaFrame, CacheError>>,
 {
-    let mut resizer = Resizer::new();
-    let first = match next_raw_first_frame(path, iter.next())
-        .and_then(|raw| encode_first_frame(raw, base_width, &mut resizer))
+    let first_raw = next_raw_first_frame(path, iter.next());
+    let Some(sink) = start_stream_with_first_raw(first_raw, base_width, cancel, first_tx, sink)
+    else
     {
-        Ok(frame) => frame,
-        Err(err) =>
-        {
-            abort_startup_error(err, cancel, first_tx, sink);
-            return;
-        }
-    };
-
-    let sink_result = sink.on_first_frame(&first);
-    let _ = first_tx.send(Ok(first));
-    if sink_result.is_err() || cancel.load(Ordering::Acquire)
-    {
-        sink.on_finish(cancel.load(Ordering::Acquire), sink_result);
         return;
-    }
+    };
 
     stream_remaining_frames(
         iter,
@@ -233,6 +256,37 @@ fn stream_iter_frames<I>(
         },
         sink,
     );
+}
+
+/// Encodes raw frame 0, seeds `sink`, notifies caller, and returns `sink` if streaming continues.
+fn start_stream_with_first_raw(
+    first_raw: Result<RawRgbaFrame, CacheError>,
+    base_width: u32,
+    cancel: &AtomicBool,
+    first_tx: &mpsc::SyncSender<Result<DecodedFirstFrame, CacheError>>,
+    mut sink: Box<dyn FrameStreamSink>,
+) -> Option<Box<dyn FrameStreamSink>>
+{
+    let mut resizer = Resizer::new();
+    let first = match first_raw.and_then(|raw| encode_first_frame(raw, base_width, &mut resizer))
+    {
+        Ok(frame) => frame,
+        Err(err) =>
+        {
+            abort_startup_error(err, cancel, first_tx, sink);
+            return None;
+        }
+    };
+
+    let sink_result = sink.on_first_frame(&first);
+    let _ = first_tx.send(Ok(first));
+    if sink_result.is_err() || cancel.load(Ordering::Acquire)
+    {
+        sink.on_finish(cancel.load(Ordering::Acquire), sink_result);
+        return None;
+    }
+
+    Some(sink)
 }
 
 /// Sends a startup decoding error to the caller and shuts down the sink cleanly.
