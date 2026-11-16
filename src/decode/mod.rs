@@ -15,6 +15,9 @@ pub mod pixel;
 // Synchronous frame-0 extraction and background worker streaming.
 pub mod stream;
 
+// Video container probing via `ffprobe` and `ffmpeg` PAM/RGBA frame streaming.
+pub(crate) mod video;
+
 // Frame payload records, buffer validation, and premultiplied pixel conversion helpers.
 pub use pixel::{
     BYTES_PER_PIXEL, DecodedFirstFrame, EncodedFrame, checked_argb_byte_len,

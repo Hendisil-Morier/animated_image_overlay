@@ -25,6 +25,7 @@ use super::{
     },
     pipeline::{PipelineParams, stream_apng_remaining, stream_remaining_frames},
     pixel::{DecodedFirstFrame, EncodedFrame, RawRgbaFrame, encode_first_frame},
+    video::open_video_frames,
 };
 use crate::error::{CacheError, OverlayError};
 
@@ -144,6 +145,15 @@ fn run_worker_decoder(
         OpenedSource::Webp(reader) => with_webp_reader_frames(path, reader, true, |opened| {
             stream_iter_result(path, opened, base_width, max_frames, cancel, first_tx, sink);
         }),
+        OpenedSource::Video(probe) => stream_iter_result(
+            path,
+            open_video_frames(path, &probe, base_width, max_frames),
+            base_width,
+            max_frames,
+            cancel,
+            first_tx,
+            sink,
+        ),
         OpenedSource::StaticPng(png) => stream_iter_result(
             path,
             Ok(Box::new(iter::once(decode_static_png(path, *png)))),

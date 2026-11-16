@@ -1,6 +1,8 @@
 //! Integration tests verifying APNG chunk splitting, W3C compositing, fractional delays,
 //! indexed palettes, hidden fallback frames, parallel APNG decoding, and abort handling.
 
+#[path = "support/apng.rs"]
+mod apng_support;
 #[path = "support/mod.rs"]
 mod support;
 
@@ -22,15 +24,13 @@ use animated_image_widget::{
     },
     error::CacheError,
 };
+use apng_support::{SyntheticPatchSpec, encode_solid_apng_fraction, encode_synthetic_apng};
 use image::{
     AnimationDecoder, ImageEncoder, RgbaImage,
     codecs::png::{PngDecoder, PngEncoder},
 };
 use lz4_flex::decompress_size_prepended;
-use support::{
-    RecordedStream, RecordingSink, SyntheticPatchSpec, TempDecodeDir, encode_solid_apng_fraction,
-    encode_synthetic_apng,
-};
+use support::{RecordedStream, RecordingSink, TempDecodeDir};
 
 fn assert_apng_fraction_delay_us(
     dir: &Path,

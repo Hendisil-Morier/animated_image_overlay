@@ -1,6 +1,8 @@
 //! Integration tests verifying APNG, GIF, animated WebP, and static decoding,
 //! `--max-frames` limits, single-open extraction, parallel worker ordering, and cancellation.
 
+#[path = "support/apng.rs"]
+mod apng_support;
 #[path = "support/mod.rs"]
 mod support;
 
@@ -17,12 +19,13 @@ use animated_image_widget::{
     decode::{DecodedFirstFrame, EncodedFrame, FrameDecoder, FrameStreamSink},
     error::CacheError,
 };
+use apng_support::encode_solid_apng_fraction;
 use image::{
     Delay, Frame as ImgFrame, ImageEncoder, RgbaImage,
     codecs::{bmp::BmpEncoder, gif::GifEncoder, png::PngEncoder},
 };
 use lz4_flex::decompress_size_prepended;
-use support::{RecordedStream, RecordingSink, TempDecodeDir, encode_solid_apng_fraction};
+use support::{RecordedStream, RecordingSink, TempDecodeDir};
 use webp_animation::Encoder as WebpEncoder;
 
 fn encode_apng_2x2_ms(frames_rgba: &[([u8; 4], u16)]) -> Vec<u8>

@@ -22,9 +22,11 @@ use webp_animation::{ColorMode, Decoder as WebpDecoder, DecoderOptions as WebpOp
 use super::apng::{ApngCompositor, ApngHeader, ApngPacketReader, decode_apng_packet};
 // Shared raw frame struct, cache error mappings, and normalized frame delay clamping.
 use super::pixel::{DecodedFirstFrame, RawRgbaFrame, encode_first_frame};
+// Video container metadata probe and `ffmpeg` PAM stream reader.
+use super::video::{VideoProbe, has_video_signature, open_video_frames, probe_video};
 use crate::{error::CacheError, playback::PlaybackClock};
 
-/// Single opened image container reused across startup probing and frame decoding.
+/// Single opened image or video container reused across startup probing and frame decoding.
 pub(crate) enum OpenedSource
 {
     /// PNG container verified to carry an `acTL` animation control chunk.
@@ -38,6 +40,9 @@ pub(crate) enum OpenedSource
 
     /// WebP file reader positioned at byte offset 0.
     Webp(BufReader<File>),
+
+    /// Probed MP4 or compatible video container decoded via `ffmpeg`.
+    Video(Box<VideoProbe>),
 
     /// Static still image reader retaining its guessed format and buffered file handle.
     Static(Box<ImageReader<BufReader<File>>>),
@@ -78,7 +83,18 @@ pub(crate) fn open_source(path: &Path) -> Result<OpenedSource, CacheError>
         }
         Some(ImageFormat::Gif) => Ok(OpenedSource::Gif(rewind_reader(path, reader)?)),
         Some(ImageFormat::WebP) => Ok(OpenedSource::Webp(rewind_reader(path, reader)?)),
-        _ => Ok(OpenedSource::Static(Box::new(reader))),
+        Some(_) => Ok(OpenedSource::Static(Box::new(reader))),
+        None =>
+        {
+            if has_video_signature(path)?
+            {
+                Ok(OpenedSource::Video(Box::new(probe_video(path)?)))
+            }
+            else
+            {
+                Ok(OpenedSource::Static(Box::new(reader)))
+            }
+        }
     }
 }
 
@@ -102,6 +118,7 @@ pub(crate) fn decode_single_frame_sync(
         {
             with_webp_reader_frames(path, reader, false, |opened| opened.map(|mut it| it.next()))?
         }
+        OpenedSource::Video(probe) => open_video_frames(path, &probe, base_width, 1)?.next(),
         OpenedSource::StaticPng(png) => Some(decode_static_png(path, *png)),
         OpenedSource::Static(reader) => Some(decode_image_reader(path, *reader)),
     };
