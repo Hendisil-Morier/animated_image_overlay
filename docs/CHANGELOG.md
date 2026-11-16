@@ -10,7 +10,11 @@ All notable changes to this project are documented here.
 
 ### Performance
 
-- Parallelized per-frame APNG PNG decompression across the bounded worker pool (`src/decode/apng.rs`, `src/decode/codecs.rs`, `src/decode/pipeline.rs`, `src/decode/stream.rs`), splitting raw `fcTL`/`fdAT` packets sequentially via `ApngPacketReader`, inflating per-frame patches in parallel via `decode_apng_packet`, compositing blend and dispose operations in strict sequence via `ApngCompositor`, and prioritizing ready raw canvas encoding ahead of packet inflation to keep memory bounded and prevent pipeline stalls.
+- Parallelized per-frame APNG PNG decompression across the bounded worker pool (`src/decode/apng/`, `src/decode/codecs.rs`, `src/decode/pipeline/`, `src/decode/stream.rs`), splitting raw `fcTL`/`fdAT` packets sequentially via `ApngPacketReader`, inflating per-frame patches in parallel via `decode_apng_packet`, compositing blend and dispose operations in strict sequence via `ApngCompositor`, and prioritizing ready raw canvas encoding ahead of packet inflation to keep memory bounded and prevent pipeline stalls.
+
+### Changed
+
+- Split multi-role source modules and oversized integration test suites along domain boundaries while preserving all public API paths via pure `mod.rs` facades: decomposed `src/decode/apng/` (`reader.rs`, `patch.rs`, `compositor.rs`), `src/decode/pipeline/` (`coordinator.rs`, `stages.rs`), `src/decode/pixel/` (`frame.rs`, `rotate.rs`), and `src/wayland/runtime/` (`state.rs`, `playback.rs`, `effects.rs`, moving `handle_pointer_event` out of `src/wayland/handlers.rs`), plus split `tests/decode_tests.rs` and `tests/wayland_input_tests.rs` across `tests/support/mod.rs` (unifying duplicate synthetic APNG fixtures), `tests/pixel_tests.rs`, `tests/apng_tests.rs`, and `tests/wayland_ui_tests.rs`.
 
 ### Documentation
 

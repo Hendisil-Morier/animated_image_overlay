@@ -25,14 +25,14 @@ Store frame timing in microseconds independently of playback FPS limits, synchro
 - Persist frame timings in `CacheMetadata::delays_us` using a `CACHE_MIN_FRAME_DELAY_US = 1_000` (`1,000 fps`) guard (`DEFAULT_FRAME_DELAY_US = 33_000` fallback), while omitting legacy `delays_ms` so existing rounded caches fail validation cleanly in `try_open_cached_store` and re-decode.
 - Enforce playback rate ceilings dynamically in `PlaybackClock::with_max_fps` via `-f` / `--max-fps` (`1..=1000`, defaulting to `DEFAULT_MAX_FPS = 240` / `MIN_FRAME_DELAY_US = 4_167`) while keeping disk metadata independent of per-launch `-f` values, and rebase deadlines past `STALL_RECOVERY_MS = 1000.0` (`STALL_RECOVERY_US`) after suspend gaps.
 
-### 2. Coalesced Pointer Frames, Subsurface Commits, and Move Damage (`src/wayland/app.rs`, `src/wayland/scene.rs`, `src/wayland/chrome.rs`, `src/wayland/handlers.rs`, `src/wayland/input.rs`, `src/wayland/runtime.rs`)
+### 2. Coalesced Pointer Frames, Subsurface Commits, and Move Damage (`src/wayland/app.rs`, `src/wayland/scene.rs`, `src/wayland/chrome.rs`, `src/wayland/handlers.rs`, `src/wayland/input.rs`, `src/wayland/runtime/effects.rs`)
 
 - Coalesce scene and cursor transitions once per `PointerHandler::pointer_frame` batch using `InputEffects::merge_scene_flags` while running immediate side effects (`OverlayRuntime::apply_immediate_effects`) per event so quits and pause toggles execute promptly.
 - Run corner handle and edit border chrome on synchronized child subsurfaces that cache last committed coordinates, buffer scale, opacity appearance, and `wl_region` input rectangles (`OverlayChrome`, `OverlayScene::sync_layout_inner`).
 - Commit `parent_layer` before `image_surface` during layout sync and emit `damage_buffer(0, 0, 1, 1)` on pure position changes (`prepare_image_surface_state`) so compositors repaint dragged child subsurfaces immediately.
 - Eagerly create `cursor_surface` in `run_overlay` (`src/wayland/app.rs`) before binding `ThemedPointer` so pointer cursor updates succeed on initial seat capability events.
 
-### 3. On-Demand `--stats` Telemetry (`src/cli.rs`, `src/playback.rs`, `src/wayland/stats.rs`, `src/wayland/runtime.rs`)
+### 3. On-Demand `--stats` Telemetry (`src/cli.rs`, `src/playback.rs`, `src/wayland/stats.rs`, `src/wayland/runtime/state.rs`)
 
 - Track `skipped_frames` and `frontier_held` per tick in `PlaybackStep` without extra allocation.
 - Allocate `OverlayStats::with_cpu` and register its `STATS_INTERVAL_MS = 1000` `calloop` timer only when `--stats` is passed, sampling `ClockId::ProcessCPUTime` (`rustix::time::clock_gettime` via `OverlayStats::sample_cpu_time` and `OverlayStats::logical_cpu_count`) and `/proc/self/status` `VmRSS` (`OverlayStats::sample_process_ram_bytes`) to emit presented FPS, per-core (`cpu`) and host-normalized (`host`) CPU%, overall process RAM (`ram=...MiB`), catch-up skips, frontier holds, average/max microsecond staging latency, active cache tier (`ram(...)` vs `lraw`, plus `disp`), active `decode=decoding(...)` progress while decoding, and one-shot cold decode completion throughput (omitting `frame` cursor and post-decode `done`/`warm` labels).

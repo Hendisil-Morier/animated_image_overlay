@@ -84,9 +84,9 @@ Rust crate modules under `src/`:
 - `src/error.rs`, `src/atomic_fs.rs`, & `src/xdg.rs`: Typed `thiserror` errors, RAII atomic temp-file writers, and shared XDG directory lookup.
 - `src/config.rs`: `flock`-serialized JSON config persistence and per-field corruption recovery.
 - `src/layout.rs` & `src/playback.rs`: Pure monitor-clamped geometry calculations and drift/stall-resilient frame clock.
-- `src/decode/`: Streaming APNG, GIF, animated WebP, and static decoding (`apng.rs`, `codecs.rs`, `pipeline.rs`, `pixel.rs`, `stream.rs`).
+- `src/decode/`: Streaming APNG (`apng/{mod,reader,patch,compositor}.rs`), GIF, animated WebP, and static decoding (`codecs.rs`, `pipeline/{mod,coordinator,stages}.rs`, `pixel/{mod,frame,rotate}.rs`, `stream.rs`).
 - `src/cache/`: Deterministic `.lraw`/`.json` disk storage and 30-day pruning (`disk.rs`), configurable RAM LRU store (`memory.rs`), warm chunk reader (`reader.rs`), decode writer (`sink.rs`), and `FrameCache` facade (`store.rs`).
-- `src/wayland/`: `calloop` event-loop bootstrap (`app.rs`), runtime timer/state coordination (`runtime.rs`), periodic `--stats` telemetry (`stats.rs`), Wayland protocol dispatch (`handlers.rs`), layer-shell/subsurface scene (`scene.rs`), frame resampling and SHM staging (`frame_stage.rs`), display-resolution frame cache (`display_cache.rs`), corner handle and dashed border chrome (`chrome.rs`), handle/outline pixel rasterizer (`chrome_raster.rs`), `SlotPool` frame ring (`shm_ring.rs`), monitor lookup (`monitor.rs`), pointer state (`input.rs`), and triple-click/shortcut mapping (`shortcuts.rs`).
+- `src/wayland/`: `calloop` event-loop bootstrap (`app.rs`), runtime state/timer, playback, and input effect coordination (`runtime/{mod,state,playback,effects}.rs`), periodic `--stats` telemetry (`stats.rs`), Wayland protocol dispatch (`handlers.rs`), layer-shell/subsurface scene (`scene.rs`), frame resampling and SHM staging (`frame_stage.rs`), display-resolution frame cache (`display_cache.rs`), corner handle and dashed border chrome (`chrome.rs`), handle/outline pixel rasterizer (`chrome_raster.rs`), `SlotPool` frame ring (`shm_ring.rs`), monitor lookup (`monitor.rs`), pointer state (`input.rs`), and triple-click/shortcut mapping (`shortcuts.rs`).
 
 Run formatting, linting, Rust integration tests (`tests/`), and API doc checks:
 
