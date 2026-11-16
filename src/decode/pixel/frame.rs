@@ -132,12 +132,12 @@ pub(super) fn validate_argb_buffer(
     Ok(())
 }
 
-/// Scales `raw` to fit `base_width`, converts to premultiplied `ARGB8888`, and compresses via LZ4.
-pub(crate) fn encode_first_frame(
+/// Scales `raw` to fit `base_width` and converts straight RGBA pixels to premultiplied `ARGB8888`.
+pub(crate) fn raw_to_premultiplied_argb8888(
     raw: RawRgbaFrame,
     base_width: u32,
     resizer: &mut Resizer,
-) -> Result<DecodedFirstFrame, CacheError>
+) -> Result<(u32, u32, u32, Vec<u8>), CacheError>
 {
     let src_w = raw.width.max(1);
     let src_h = raw.height.max(1);
@@ -148,15 +148,26 @@ pub(crate) fn encode_first_frame(
 
     let _ = checked_argb_byte_len(target_w, target_h)?;
     let mut argb8888 = downscale_if_needed(raw.rgba, src_w, src_h, target_w, target_h, resizer)?;
-
     straight_rgba_to_premultiplied_argb8888(&mut argb8888);
+    Ok((target_w, target_h, raw.delay_us, argb8888))
+}
+
+/// Scales `raw` to fit `base_width`, converts to premultiplied `ARGB8888`, and compresses via LZ4.
+pub(crate) fn encode_first_frame(
+    raw: RawRgbaFrame,
+    base_width: u32,
+    resizer: &mut Resizer,
+) -> Result<DecodedFirstFrame, CacheError>
+{
+    let (width, height, delay_us, argb8888) =
+        raw_to_premultiplied_argb8888(raw, base_width, resizer)?;
     let lz4_payload = compress_prepend_size(&argb8888);
 
     Ok(DecodedFirstFrame {
-        width: target_w,
-        height: target_h,
-        delay_ms: PlaybackClock::delay_us_to_ms(raw.delay_us),
-        delay_us: raw.delay_us,
+        width,
+        height,
+        delay_ms: PlaybackClock::delay_us_to_ms(delay_us),
+        delay_us,
         argb8888,
         lz4_payload,
     })

@@ -13,7 +13,7 @@ use std::{
 // Video stream probe metadata and shared raw RGBA pixel container.
 use super::probe::VideoProbe;
 use crate::{
-    decode::{BYTES_PER_PIXEL, checked_argb_byte_len, codecs::FrameIterator, pixel::RawRgbaFrame},
+    decode::{BYTES_PER_PIXEL, checked_argb_byte_len, pixel::RawRgbaFrame},
     error::CacheError,
     playback::PlaybackClock,
 };
@@ -114,7 +114,7 @@ impl Drop for FfmpegChildGuard
 }
 
 /// Streaming video frame iterator yielding scaled straight-RGBA frames and microsecond delays.
-struct VideoFrameIterator
+pub(crate) struct VideoFrameIterator
 {
     // Source file path preserved for contextual decode errors.
     path: PathBuf,
@@ -142,12 +142,12 @@ struct VideoFrameIterator
 }
 
 /// Spawns `ffmpeg` to decode scaled straight-RGBA PAM frames and microsecond VFR timestamps.
-pub(crate) fn open_video_frames<'a>(
-    path: &'a Path,
+pub(crate) fn open_video_frames(
+    path: &Path,
     probe: &VideoProbe,
     base_width: u32,
     max_frames: usize,
-) -> Result<FrameIterator<'a>, CacheError>
+) -> Result<VideoFrameIterator, CacheError>
 {
     let target_width = base_width.min(probe.display_width).max(1);
     let filter =
@@ -207,7 +207,7 @@ pub(crate) fn open_video_frames<'a>(
             source,
         })?;
 
-    Ok(Box::new(VideoFrameIterator {
+    Ok(VideoFrameIterator {
         path: path.to_path_buf(),
         expected_dims: None,
         stdout: BufReader::new(stdout),
@@ -219,7 +219,7 @@ pub(crate) fn open_video_frames<'a>(
             child: Some(child),
             stderr_thread: Some(stderr_thread),
         },
-    }))
+    })
 }
 
 impl VideoFrameIterator

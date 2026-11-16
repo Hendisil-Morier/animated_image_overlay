@@ -231,11 +231,13 @@ fn load_startup_resources(
 
     let ram_budget_bytes = cli.ram_cache_bytes()?;
     let display_budget_bytes = cli.display_cache_bytes()?;
-    let cache = FrameCache::open_with_ram_budget(
+    let video_cache_bytes = cli.video_cache_bytes()?;
+    let cache = FrameCache::open_with_budgets(
         &cli.file,
         cli.base_width,
         cli.max_frames,
         ram_budget_bytes,
+        video_cache_bytes,
         wakeup_cb,
     )?;
 

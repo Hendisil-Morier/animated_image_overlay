@@ -11,8 +11,14 @@ use std::{
 // JSON metadata deserialization for `ffprobe -print_format json`.
 use serde::Deserialize;
 
-// Normalized cache timing clamps and cache errors.
-use crate::{error::CacheError, playback::PlaybackClock};
+// Checked pixel byte math, cache errors, and normalized delay timing clamps.
+use crate::{decode::checked_argb_byte_len, error::CacheError, playback::PlaybackClock};
+
+/// Default uncompressed RGBA ceiling (`512 MiB`) for storing short video loops in `.lraw`.
+pub(crate) const DEFAULT_VIDEO_CACHE_BUDGET_BYTES: usize = 512 * 1024 * 1024;
+
+// Upper frame count ceiling preventing massive `.lraw` writes even for small overlays.
+const MAX_CACHED_VIDEO_FRAMES: usize = 1_800;
 
 // Maximum initial header bytes read when sniffing container magic signatures.
 const MAGIC_HEADER_BYTES: usize = 200;
@@ -30,17 +36,88 @@ pub(crate) struct VideoProbe
     /// Display-adjusted frame width in pixels after honoring container rotation metadata.
     pub(crate) display_width: u32,
 
+    /// Display-adjusted frame height in pixels after honoring container rotation metadata.
+    pub(crate) display_height: u32,
+
+    /// Best-effort estimate of total frame count reported by stream or duration * FPS.
+    pub(crate) estimated_frames: Option<u64>,
+
     /// Fallback per-frame microsecond delay derived from `avg_frame_rate` or `r_frame_rate`.
     pub(crate) fallback_delay_us: u32,
 }
 
-/// Top-level JSON payload emitted by `ffprobe -show_streams -print_format json`.
+impl VideoProbe
+{
+    /// Computes aspect-preserving `(target_w, target_h)` bounded by `base_width` without upscaling.
+    pub(crate) fn scaled_dimensions(&self, base_width: u32) -> (u32, u32)
+    {
+        let target_w = base_width.min(self.display_width).max(1);
+        let target_h = ((f64::from(self.display_height) * f64::from(target_w))
+            / f64::from(self.display_width))
+        .round()
+        .max(1.0) as u32;
+        (target_w, target_h)
+    }
+
+    /// Returns `true` when this video clip fits the bounded short-loop `.lraw` cache policy.
+    pub(crate) fn should_cache(
+        &self,
+        base_width: u32,
+        max_frames: usize,
+        video_cache_bytes: usize,
+    ) -> bool
+    {
+        if video_cache_bytes == 0
+        {
+            return false;
+        }
+
+        let estimated = self.estimated_frames.and_then(|n| usize::try_from(n).ok());
+        let frame_count = match (max_frames, estimated)
+        {
+            (cap, Some(est)) if cap > 0 => cap.min(est),
+            (cap, None) if cap > 0 => cap,
+            (0, Some(est)) => est,
+            (0, None) => return false,
+            _ => return false,
+        };
+
+        if frame_count == 0 || frame_count > MAX_CACHED_VIDEO_FRAMES
+        {
+            return false;
+        }
+
+        let (target_w, target_h) = self.scaled_dimensions(base_width);
+        let Ok(per_frame_bytes) = checked_argb_byte_len(target_w, target_h)
+        else
+        {
+            return false;
+        };
+
+        per_frame_bytes
+            .checked_mul(frame_count)
+            .is_some_and(|total| total <= video_cache_bytes)
+    }
+}
+
+/// Top-level JSON payload emitted by `ffprobe -show_format -show_streams -print_format json`.
 #[derive(Debug, Deserialize)]
 struct FfprobeOutput
 {
+    // Container-level metadata block holding duration fallback.
+    format: Option<FfprobeFormat>,
+
     // Ordered array of video, audio, and auxiliary streams.
     #[serde(default)]
     streams: Vec<FfprobeStream>,
+}
+
+/// Container-level format fields parsed from `ffprobe` JSON.
+#[derive(Debug, Deserialize)]
+struct FfprobeFormat
+{
+    // Total container duration formatted as decimal seconds string.
+    duration: Option<String>,
 }
 
 /// Per-stream descriptors emitted by `ffprobe` JSON.
@@ -64,6 +141,12 @@ struct FfprobeStream
 
     // Nominal stream base frame rate fallback when `avg_frame_rate` is `0/0`.
     r_frame_rate: Option<String>,
+
+    // Decimal stream frame count string when indexed cleanly in container headers.
+    nb_frames: Option<String>,
+
+    // Stream-level duration formatted as decimal seconds string.
+    duration: Option<String>,
 
     // Stream flags identifying static MP4/MKV cover art (`attached_pic == 1`).
     #[serde(default)]
@@ -203,15 +286,42 @@ fn build_video_probe(path: &Path, output: FfprobeOutput) -> Result<VideoProbe, C
 
     let coded_w = video.width.unwrap_or(1);
     let coded_h = video.height.unwrap_or(1);
-    let (display_width, _display_height) = apply_display_rotation(video, coded_w, coded_h);
+    let (display_width, display_height) = apply_display_rotation(video, coded_w, coded_h);
 
     let fps = parse_stream_fps(video);
     let fallback_delay_us =
         PlaybackClock::normalize_cache_delay_us(fps.map(|rate| 1_000_000.0 / rate));
 
+    let duration_secs = video
+        .duration
+        .as_deref()
+        .and_then(parse_positive_f64)
+        .or_else(|| {
+            output
+                .format
+                .as_ref()
+                .and_then(|fmt| fmt.duration.as_deref())
+                .and_then(parse_positive_f64)
+        });
+
+    let nb_frames = video
+        .nb_frames
+        .as_deref()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&count| count > 0);
+
+    let estimated_frames = nb_frames.or_else(|| {
+        duration_secs.zip(fps).and_then(|(secs, rate)| {
+            let approx = (secs * rate).ceil();
+            (approx.is_finite() && approx >= 1.0).then_some(approx as u64)
+        })
+    });
+
     Ok(VideoProbe {
         video_stream_index: video.index,
         display_width,
+        display_height,
+        estimated_frames,
         fallback_delay_us,
     })
 }
@@ -280,4 +390,13 @@ fn parse_rational(raw: &str) -> Option<f64>
         return None;
     }
     Some(num / den)
+}
+
+/// Parses a decimal string into a positive finite floating-point number.
+fn parse_positive_f64(raw: &str) -> Option<f64>
+{
+    raw.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|val| val.is_finite() && *val > 0.0)
 }

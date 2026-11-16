@@ -178,8 +178,14 @@ impl FrameStage
     {
         let cache_profile = cache.cache_profile();
         let (frame_count, decode_done, _) = cache_profile;
-        let spec = self.target_spec(layout, buf_scale, cache_profile);
-        if let Some(key) = spec.cache_key
+        let live_ring = cache.is_live_ring();
+        let mut spec = self.target_spec(layout, buf_scale, cache_profile);
+        if live_ring
+        {
+            // Live video rings evict consumed frames sequentially, so bypass multi-frame display cache.
+            spec.cache_key = None;
+        }
+        else if let Some(key) = spec.cache_key
             && self.display_cache.sync(key, frame_count, decode_done)
             && let Some(hit) = self.display_cache.get(frame_idx)
         {

@@ -39,6 +39,9 @@ pub struct StatsSnapshot
     /// Total uncompressed bytes currently pinned inside the source RAM LRU cache.
     pub ram_used_bytes: usize,
 
+    /// Set when the active store is a bounded `LiveVideoRing` streaming long videos.
+    pub is_live_ring: bool,
+
     /// Set when `DisplayFrameCache` is actively serving display-sized frames.
     pub display_cache_active: bool,
 
@@ -248,7 +251,12 @@ impl OverlayStats
             .checked_div(self.stage_samples)
             .unwrap_or(0);
 
-        let cache_label = if snap.fits_source_ram
+        let cache_label = if snap.is_live_ring
+        {
+            let live_mib = snap.ram_used_bytes as f64 / BYTES_PER_MIB;
+            format!("live({live_mib:.1}MiB)")
+        }
+        else if snap.fits_source_ram
         {
             let ram_mib = snap.ram_used_bytes as f64 / BYTES_PER_MIB;
             format!("ram({ram_mib:.1}MiB)")

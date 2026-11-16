@@ -237,6 +237,7 @@ impl OverlayRuntime
             paused: self.playback.is_paused(),
             fits_source_ram,
             ram_used_bytes: self.cache.ram_used_bytes(),
+            is_live_ring: self.cache.is_live_ring(),
             display_cache_active,
             display_cache_bytes,
             cpu_time: OverlayStats::sample_cpu_time(),

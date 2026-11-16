@@ -152,6 +152,7 @@ fn overlay_stats_formats_fps_cache_state_and_one_shot_decode_completion()
             paused: false,
             fits_source_ram: true,
             ram_used_bytes: 10 * 1024 * 1024,
+            is_live_ring: false,
             display_cache_active: false,
             display_cache_bytes: 0,
             cpu_time: Duration::from_millis(250),
@@ -174,6 +175,7 @@ fn overlay_stats_formats_fps_cache_state_and_one_shot_decode_completion()
             paused: true,
             fits_source_ram: false,
             ram_used_bytes: 0,
+            is_live_ring: false,
             display_cache_active: true,
             display_cache_bytes: 32 * 1024 * 1024,
             cpu_time: Duration::from_millis(2_250),
@@ -209,6 +211,7 @@ fn overlay_stats_formats_fps_cache_state_and_one_shot_decode_completion()
             paused: false,
             fits_source_ram: true,
             ram_used_bytes: 0,
+            is_live_ring: false,
             display_cache_active: false,
             display_cache_bytes: 0,
             cpu_time: Duration::from_millis(7),
@@ -218,6 +221,24 @@ fn overlay_stats_formats_fps_cache_state_and_one_shot_decode_completion()
     );
     assert!(warm_line.contains("cpu=0.7% host=0.04% ram=24.0MiB"));
     assert!(!warm_line.contains("decode="));
+
+    let live_line = warm.format_report(
+        Duration::from_secs(1),
+        StatsSnapshot {
+            frame_count: 120,
+            decode_done: true,
+            paused: false,
+            fits_source_ram: false,
+            ram_used_bytes: 12 * 1024 * 1024,
+            is_live_ring: true,
+            display_cache_active: false,
+            display_cache_bytes: 0,
+            cpu_time: Duration::from_millis(7),
+            logical_cpus: 16,
+            process_ram_bytes: 36 * 1024 * 1024,
+        },
+    );
+    assert!(live_line.contains("cache=live(12.0MiB) disp=off"));
 }
 
 #[test]
@@ -234,6 +255,7 @@ fn overlay_stats_tracks_cpu_baselines_and_degenerate_inputs()
             paused: false,
             fits_source_ram: true,
             ram_used_bytes: 0,
+            is_live_ring: false,
             display_cache_active: false,
             display_cache_bytes: 0,
             cpu_time: Duration::from_millis(900),
@@ -252,6 +274,7 @@ fn overlay_stats_tracks_cpu_baselines_and_degenerate_inputs()
             paused: false,
             fits_source_ram: true,
             ram_used_bytes: 0,
+            is_live_ring: false,
             display_cache_active: false,
             display_cache_bytes: 0,
             cpu_time: Duration::from_millis(200),
@@ -269,6 +292,7 @@ fn overlay_stats_tracks_cpu_baselines_and_degenerate_inputs()
             paused: false,
             fits_source_ram: true,
             ram_used_bytes: 0,
+            is_live_ring: false,
             display_cache_active: false,
             display_cache_bytes: 0,
             cpu_time: Duration::from_millis(2_000),

@@ -12,6 +12,8 @@ pub use frame::{
     BYTES_PER_PIXEL, DecodedFirstFrame, EncodedFrame, checked_argb_byte_len,
     resize_premultiplied_argb8888, straight_rgba_to_premultiplied_argb8888,
 };
-pub(crate) use frame::{RawRgbaFrame, encode_first_frame, encode_subsequent_frame};
+pub(crate) use frame::{
+    RawRgbaFrame, encode_first_frame, encode_subsequent_frame, raw_to_premultiplied_argb8888,
+};
 // Public bilinear CPU rotation entry point for fractional overlay angles.
 pub use rotate::rotate_argb8888_into;

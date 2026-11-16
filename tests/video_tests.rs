@@ -183,3 +183,84 @@ fn corrupt_mp4_returns_decode_error_without_hanging()
         OverlayError::Cache(CacheError::Decode { .. })
     ));
 }
+
+#[test]
+fn forced_live_video_ring_streams_wraps_across_loops_without_writing_lraw_and_stops_cleanly()
+{
+    let temp = TempDecodeDir::new("mp4_live_ring");
+    let mp4_path = temp.path().join("long_mode.mp4");
+    generate_test_video(
+        &mp4_path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=0.4:size=80x60:rate=25",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+    );
+
+    let cache_dir = temp.path().join("cache");
+    let mut cache = FrameCache::open_in_dir_with_video_budget(
+        &mp4_path,
+        80,
+        0,
+        &cache_dir,
+        64 * 1024 * 1024,
+        0,
+        30,
+        None,
+    )
+    .expect("forced LiveRing video should open cleanly");
+
+    assert!(cache.is_live_ring());
+    assert_eq!(cache.frame_dimensions(), (80, 60));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !cache.is_decode_done() && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(cache.is_decode_done(), "pass 1 loop probe did not complete");
+    let count = cache.frame_count();
+    assert!(
+        (9..=11).contains(&count),
+        "expected ~10 frames, got {count}"
+    );
+
+    // Sequential play across loop boundary (`0..count`, wrapping cleanly to `0..3` on pass 2) + repeat pinned reads.
+    for idx in (0..count).chain([0_usize, 1, 2, 2, 0])
+    {
+        let frame = cache
+            .frame_argb(idx)
+            .unwrap_or_else(|e| panic!("failed reading live frame {idx}: {e}"));
+        assert_eq!(frame.len(), 80 * 60 * 4);
+    }
+
+    assert!(cache.ram_used_bytes() > 0);
+    assert_eq!(cache.compressed_ram_bytes(), 0);
+
+    // Must not persist `.lraw` or `.json` cache artifacts in `LiveRing` mode.
+    let persisted: Vec<_> = fs::read_dir(&cache_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let ext = entry
+                .path()
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_owned();
+            matches!(ext.as_str(), "lraw" | "json")
+        })
+        .collect();
+    assert!(
+        persisted.is_empty(),
+        "LiveRing mode must not write .lraw or .json cache files: {persisted:?}"
+    );
+
+    cache.stop();
+}

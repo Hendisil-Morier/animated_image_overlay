@@ -57,6 +57,25 @@ impl FrameDecoder
         base_width: u32,
         max_frames: usize,
         cancel: Arc<AtomicBool>,
+        sink: Box<S>,
+    ) -> Result<(DecodedFirstFrame, Option<JoinHandle<()>>), OverlayError>
+    {
+        if cancel.load(Ordering::Acquire)
+        {
+            return Err(CacheError::Cancelled.into());
+        }
+
+        let source = open_source(path)?;
+        Self::open_stream_from_source(path, source, base_width, max_frames, cancel, sink)
+    }
+
+    /// Streams remaining frames from an already-opened container handle into `sink`.
+    pub(crate) fn open_stream_from_source<S: FrameStreamSink>(
+        path: &Path,
+        source: OpenedSource,
+        base_width: u32,
+        max_frames: usize,
+        cancel: Arc<AtomicBool>,
         mut sink: Box<S>,
     ) -> Result<(DecodedFirstFrame, Option<JoinHandle<()>>), OverlayError>
     {
@@ -66,7 +85,6 @@ impl FrameDecoder
         }
 
         let target_width = base_width.max(1);
-        let source = open_source(path)?;
 
         if source.is_static() || max_frames == 1
         {
@@ -147,7 +165,8 @@ fn run_worker_decoder(
         }),
         OpenedSource::Video(probe) => stream_iter_result(
             path,
-            open_video_frames(path, &probe, base_width, max_frames),
+            open_video_frames(path, &probe, base_width, max_frames)
+                .map(|iter| Box::new(iter) as FrameIterator<'_>),
             base_width,
             max_frames,
             cancel,

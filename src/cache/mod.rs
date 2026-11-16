@@ -9,6 +9,9 @@ pub mod memory;
 // Warm `.lraw` cache loading and batched background chunk reader.
 pub mod reader;
 
+// Bounded RAM lookahead ring buffer for live-streaming long videos without `.lraw` disk writes.
+mod ring;
+
 // Streaming decode consumer persisting `.lraw` payload before `.json` metadata.
 pub mod sink;
 
