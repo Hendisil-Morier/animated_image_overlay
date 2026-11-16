@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.3.2] - 2026-11-16
 
 ### Added
 - Added `--stats` CLI flag and `OverlayStats` (`src/wayland/stats.rs`) to emit 1-second stdout telemetry reporting presented FPS, catch-up frame skips, `!decode_done` frontier holds, frame staging latency (`avg`/`max` `us`), source RAM / `DisplayFrameCache` usage, and one-shot cold decode completion throughput.
