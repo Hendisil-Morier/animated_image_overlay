@@ -139,6 +139,7 @@ fn cli_rejects_invalid_base_width_and_scales()
         ["overlay", "img.png", "--monitor", "   "].as_slice(),
         ["overlay", "img.png", "--gpu", ""].as_slice(),
         ["overlay", "img.png", "--gpu", "   "].as_slice(),
+        ["overlay", "img.png", "--gpu", "asccasdweenn"].as_slice(),
     ]
     {
         let err = CliArgs::parse_flags_from(bad_args.iter().copied())
@@ -345,4 +346,16 @@ fn cli_parses_gpu_options()
         panic!("expected Run");
     };
     assert_eq!(vaapi_args.gpu, "vaapi");
+
+    let err = CliArgs::parse_flags_from(["overlay", "video.mp4", "--gpu", "asccasdweenn"])
+        .expect_err("unknown gpu backend should be rejected");
+    match err
+    {
+        OverlayError::CliValidation(msg) =>
+        {
+            assert!(msg.contains("Unsupported --gpu mode 'asccasdweenn'"));
+            assert!(msg.contains("Supported modes:"));
+        }
+        other => panic!("expected CliValidation, got {other:?}"),
+    }
 }

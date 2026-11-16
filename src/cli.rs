@@ -33,6 +33,26 @@ const DEFAULT_VIDEO_CACHE_MB: usize = 512;
 // Default target monitor selector when `--monitor` is omitted.
 const DEFAULT_MONITOR: &str = "0";
 
+/// Supported GPU hardware acceleration backends.
+pub const SUPPORTED_GPU_MODES: &[&str] = &[
+    "auto",
+    "none",
+    "off",
+    "cuda",
+    "nvdec",
+    "vaapi",
+    "vdpau",
+    "qsv",
+    "drm",
+    "opencl",
+    "vulkan",
+    "amf",
+    "videotoolbox",
+    "d3d11va",
+    "d3d12va",
+    "dxva2",
+];
+
 // Concise mouse and keyboard interaction summary printed in `--help`.
 const CONTROLS_HELP: &str = "\
 Controls:
@@ -350,10 +370,20 @@ impl CliArgs
             )));
         }
 
-        if self.gpu.trim().is_empty()
+        let gpu_mode = self.gpu.trim().to_ascii_lowercase();
+        if gpu_mode.is_empty()
         {
             return Err(OverlayError::CliValidation(String::from(
                 "--gpu must not be empty",
+            )));
+        }
+
+        if !SUPPORTED_GPU_MODES.contains(&gpu_mode.as_str())
+        {
+            return Err(OverlayError::CliValidation(format!(
+                "Unsupported --gpu mode '{}'. Supported modes: {}",
+                self.gpu.trim(),
+                SUPPORTED_GPU_MODES.join(", ")
             )));
         }
 

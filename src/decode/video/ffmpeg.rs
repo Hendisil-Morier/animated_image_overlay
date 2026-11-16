@@ -55,6 +55,50 @@ struct FfmpegChildGuard
     stderr_thread: Option<JoinHandle<Vec<String>>>,
 }
 
+/// Strips bracketed logger prefixes such as `[vist#0:0 @ 0x...]` from an `ffmpeg` stderr line.
+fn sanitize_ffmpeg_stderr_line(line: &str) -> &str
+{
+    let trimmed = line.trim();
+    if let Some(rest) = trimmed.strip_prefix('[')
+        && let Some(idx) = rest.find(']')
+    {
+        rest[idx + 1..].trim()
+    }
+    else
+    {
+        trimmed
+    }
+}
+
+/// Formats trailing stderr diagnostic lines into a clean, human-readable summary.
+fn format_ffmpeg_error(status: std::process::ExitStatus, tail: &[String]) -> String
+{
+    let mut cleaned: Vec<&str> = Vec::new();
+    for line in tail
+    {
+        let s = sanitize_ffmpeg_stderr_line(line);
+        if s.is_empty()
+            || s.starts_with("Error opening input files:")
+            || s.starts_with("Trailing option(s) found")
+        {
+            continue;
+        }
+        if !cleaned.contains(&s)
+        {
+            cleaned.push(s);
+        }
+    }
+
+    if cleaned.is_empty()
+    {
+        format!("ffmpeg process exited with {status}")
+    }
+    else
+    {
+        cleaned.join("; ")
+    }
+}
+
 impl FfmpegChildGuard
 {
     /// Waits cleanly for child termination on EOF and joins `stderr` diagnostics.
@@ -81,14 +125,7 @@ impl FfmpegChildGuard
             return Ok(());
         }
 
-        let summary = if tail.is_empty()
-        {
-            format!("ffmpeg exited with status {status}")
-        }
-        else
-        {
-            format!("ffmpeg failed ({status}): {}", tail.join(" | "))
-        };
+        let summary = format_ffmpeg_error(status, &tail);
         Err(CacheError::Decode {
             path: path.to_path_buf(),
             reason: summary,

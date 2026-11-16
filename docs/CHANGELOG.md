@@ -8,6 +8,10 @@ All notable changes to this project are documented here.
 
 - Hardware-accelerated video decoding support via `ffmpeg -hwaccel <mode>` controlled by `--gpu <MODE>` (default: `auto`; `none` or `off` forces software CPU decoding, or explicit backends such as `cuda`, `vaapi`, `vdpau`, `qsv`, `vulkan`).
 
+### Changed
+
+- Enhanced CLI and decoder error reporting: `--gpu <MODE>` validates against supported hardware backends upfront with an actionable supported modes list, and `ffmpeg` stderr reporting strips internal bracketed log headers and deduplicates noise.
+
 ## [0.4.1] - 2026-11-16
 
 ### Removed

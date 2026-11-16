@@ -113,8 +113,8 @@ pub enum CacheError
         reason: String,
     },
 
-    /// Failed to decode a source image or animation frame.
-    #[error("Image decode failure for {path}: {reason}")]
+    /// Failed to decode a source image, animation frame, or video stream.
+    #[error("Failed to decode {path}: {reason}")]
     Decode
     {
         /// Source image file path.
