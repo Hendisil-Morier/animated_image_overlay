@@ -8,6 +8,9 @@
 // Crash-safe atomic sibling temporary file writes shared across config and cache.
 pub(crate) mod atomic_fs;
 
+// Synchronized `ffprobe`/`ffmpeg` audio decoding and in-process `cpal` playback.
+pub mod audio;
+
 // LZ4 disk + configurable RAM LRU frame cache with 30-day pruning and fallback recovery.
 pub mod cache;
 

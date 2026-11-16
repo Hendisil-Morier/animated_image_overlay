@@ -1,50 +1,14 @@
-//! Shared temporary directories, recording sinks, and synthetic APNG builders for decode integration tests.
+//! Shared recording sinks and re-exported temp directory utilities for decode integration tests.
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
-};
+mod temp_dir;
+
+use std::sync::{Arc, Mutex};
 
 use animated_image_widget::{
     decode::{DecodedFirstFrame, EncodedFrame, FrameStreamSink},
     error::CacheError,
 };
-
-/// Temporary directory cleaned up automatically when dropped.
-pub struct TempDecodeDir
-{
-    path: PathBuf,
-}
-
-impl TempDecodeDir
-{
-    pub fn new(name: &str) -> Self
-    {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after epoch")
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("aiw_dec_{name}_{}_{nanos}", std::process::id()));
-        fs::create_dir_all(&path).expect("temp decode dir created");
-        Self { path }
-    }
-
-    pub fn path(&self) -> &Path
-    {
-        &self.path
-    }
-}
-
-impl Drop for TempDecodeDir
-{
-    fn drop(&mut self)
-    {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
+pub use temp_dir::TempDecodeDir;
 
 /// Captured frames, delays, and terminal stream status observed by `RecordingSink`.
 #[derive(Default)]
