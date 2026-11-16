@@ -5,7 +5,10 @@ use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind};
 
 // Parent runtime coordinator and input side-effect mask.
 use super::state::OverlayRuntime;
-use crate::wayland::input::InputEffects;
+use crate::{config::AudioPrefs, wayland::input::InputEffects};
+
+// Volume change per `.` / `,` key press (5% of full scale).
+const AUDIO_VOLUME_STEP: f64 = 0.05;
 
 impl OverlayRuntime
 {
@@ -86,6 +89,7 @@ impl OverlayRuntime
         }
 
         self.sync_timers_for_effects(effects);
+        self.apply_audio_effects(effects);
 
         if effects.toggle_pause
         {
@@ -93,6 +97,29 @@ impl OverlayRuntime
         }
 
         false
+    }
+
+    /// Applies mute and volume key effects to the audio engine and the persisted preferences.
+    fn apply_audio_effects(&mut self, effects: InputEffects)
+    {
+        let Some(audio) = &self.audio
+        else
+        {
+            return;
+        };
+
+        if effects.toggle_mute
+        {
+            self.audio_prefs.muted = !self.audio_prefs.muted;
+            audio.set_muted(self.audio_prefs.muted);
+        }
+        if effects.volume_steps != 0
+        {
+            let stepped =
+                self.audio_prefs.volume + f64::from(effects.volume_steps) * AUDIO_VOLUME_STEP;
+            self.audio_prefs.volume = AudioPrefs::clamped_volume(stepped);
+            audio.set_volume(self.audio_prefs.volume);
+        }
     }
 
     /// Applies immediate side effects and synchronizes surfaces, buffers, and corner handle.
@@ -169,6 +196,10 @@ impl OverlayRuntime
     {
         let paused = self.playback.toggle_pause();
         tracing::debug!(paused, "Toggled playback pause");
+        if let Some(audio) = &self.audio
+        {
+            audio.set_paused(paused);
+        }
         if paused
         {
             self.cancel_frame_timer();

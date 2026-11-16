@@ -277,6 +277,32 @@ fn keyboard_shortcuts_operate_only_in_edit_mode()
         Some(KeyShortcut::Flip(FlipAxis::Vertical))
     );
     assert_eq!(map_edit_keysym(Keysym::q), Some(KeyShortcut::Quit));
+    assert_eq!(map_edit_keysym(Keysym::m), Some(KeyShortcut::ToggleMute));
+    assert_eq!(
+        map_edit_keysym(Keysym::period),
+        Some(KeyShortcut::AdjustVolume { steps: 1 })
+    );
+    assert_eq!(
+        map_edit_keysym(Keysym::comma),
+        Some(KeyShortcut::AdjustVolume { steps: -1 })
+    );
+
+    // Audio shortcuts need edit mode, schedule a save, and volume repeats while held.
+    assert_eq!(
+        input.on_key_press(Keysym::m, &mut layout),
+        InputEffects::default()
+    );
+    input.editing = true;
+    let mute = input.on_key_press(Keysym::m, &mut layout);
+    assert!(mute.toggle_mute && mute.schedule_save);
+    let louder = input.on_key_press(Keysym::period, &mut layout);
+    assert_eq!(louder.volume_steps, 1);
+    assert!(louder.schedule_save);
+    assert_eq!(
+        input.on_key_repeat(Keysym::comma, &mut layout).volume_steps,
+        -1
+    );
+    assert!(!input.on_key_repeat(Keysym::m, &mut layout).toggle_mute);
 }
 
 #[test]

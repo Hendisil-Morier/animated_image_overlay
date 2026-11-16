@@ -32,9 +32,11 @@ use super::{
     stats::OverlayStats,
 };
 use crate::{
+    audio::{AVSyncMode, AudioEngine, AudioProbe},
     cache::{FrameCache, WakeupCallback},
     cli::CliArgs,
-    config::{ConfigStore, OverlayState},
+    config::{AudioPrefs, ConfigStore, OverlayState},
+    decode::video::has_video_signature,
     error::{OverlayError, WaylandError},
     layout::OverlayLayout,
     playback::PlaybackClock,
@@ -73,6 +75,12 @@ struct StartupResources
 
     // Open frame store holding decoded frame 0 and disk/RAM chunks.
     cache: FrameCache,
+
+    // Optional audio output for an embedded video track or `--audio` companion file.
+    audio: Option<AudioEngine>,
+
+    // Volume and mute preferences resolved from saved config plus `--volume` / `--mute`.
+    audio_prefs: AudioPrefs,
 
     // Configured `DisplayFrameCache` byte limit (`-c display=<MB>`).
     display_budget_bytes: usize,
@@ -127,6 +135,9 @@ pub fn run_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayE
         config_store: startup.config_store,
         config_key: startup.config_key,
         cache: startup.cache,
+        audio: startup.audio,
+        audio_prefs: startup.audio_prefs,
+        audio_started: false,
         scene: None,
         layout: OverlayLayout::new(frame_w, frame_h, 1920, 1080, startup.initial_state),
         input: InputState::with_editing(cli.edit),
@@ -241,13 +252,74 @@ fn load_startup_resources(
         wakeup_cb,
     )?;
 
+    let mut audio_prefs = config_store.load_audio_prefs(&config_key);
+    if let Some(volume) = cli.volume
+    {
+        audio_prefs.volume = AudioPrefs::clamped_volume(volume);
+    }
+    audio_prefs.muted |= cli.mute;
+    let audio = open_audio(cli, audio_prefs);
+
     Ok(StartupResources {
         config_store,
         config_key,
         initial_state,
         cache,
+        audio,
+        audio_prefs,
         display_budget_bytes,
     })
+}
+
+/// Opens audio for an embedded video track or the `--audio` file, or continues silently on failure.
+///
+/// An explicit `--audio` file loops independently of the visuals, while a video's own track is
+/// realigned to frame 0 at every visual loop wrap.
+fn open_audio(cli: &CliArgs, prefs: AudioPrefs) -> Option<AudioEngine>
+{
+    let (path, mode) = match &cli.audio
+    {
+        Some(audio) => (audio.clone(), AVSyncMode::IndependentAudioLoop),
+        None if has_video_signature(&cli.file).unwrap_or(false) =>
+        {
+            (cli.file.clone(), AVSyncMode::CoupledLoop)
+        }
+        None => return None,
+    };
+
+    let probe = match AudioProbe::probe_optional(&path)
+    {
+        Ok(Some(probe)) => probe,
+        Ok(None) =>
+        {
+            tracing::info!(path = %path.display(), "Media file has no audio stream");
+            return None;
+        }
+        Err(err) =>
+        {
+            tracing::warn!(error = %err, "Audio probe failed; continuing silently");
+            return None;
+        }
+    };
+
+    match AudioEngine::open(
+        &path,
+        probe,
+        mode,
+        None,
+        Instant::now(),
+        prefs.volume,
+        prefs.muted,
+        None,
+    )
+    {
+        Ok(engine) => Some(engine),
+        Err(err) =>
+        {
+            tracing::warn!(error = %err, "Audio engine failed to start; continuing silently");
+            None
+        }
+    }
 }
 
 /// Performs two compositor roundtrips so `wl_output` / `xdg_output` metadata resolves `--monitor`.

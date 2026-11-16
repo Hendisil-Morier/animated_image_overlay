@@ -57,17 +57,28 @@ pub enum KeyShortcut
 
     /// Toggle animation playback pause/resume (`Space`).
     TogglePause,
+
+    /// Toggle audio mute (`m` / `M`).
+    ToggleMute,
+
+    /// Step audio volume by one 5% increment (`.` / `>` up, `,` / `<` down).
+    AdjustVolume
+    {
+        /// Signed volume step count (`1` louder, `-1` quieter).
+        steps: i8,
+    },
 }
 
 impl KeyShortcut
 {
-    /// Returns `true` when holding the key should repeat the shortcut (`Move` / `Scale` / fine `Rotate`).
+    /// Returns `true` when holding the key should repeat the shortcut (`Move` / `Scale` / `AdjustVolume` / fine `Rotate`).
     pub const fn is_repeatable(self) -> bool
     {
         matches!(
             self,
             Self::Move { .. }
                 | Self::Scale { .. }
+                | Self::AdjustVolume { .. }
                 | Self::Rotate {
                     repeatable: true,
                     ..
@@ -176,6 +187,9 @@ pub fn map_edit_keysym(keysym: Keysym) -> Option<KeyShortcut>
         Keysym::f => Some(KeyShortcut::Flip(FlipAxis::Horizontal)),
         Keysym::F => Some(KeyShortcut::Flip(FlipAxis::Vertical)),
         Keysym::space => Some(KeyShortcut::TogglePause),
+        Keysym::m | Keysym::M => Some(KeyShortcut::ToggleMute),
+        Keysym::period | Keysym::greater => Some(KeyShortcut::AdjustVolume { steps: 1 }),
+        Keysym::comma | Keysym::less => Some(KeyShortcut::AdjustVolume { steps: -1 }),
         _ => None,
     }
 }

@@ -13,6 +13,9 @@ use crate::playback::{PlaybackStep, TickOutcome};
 // Recovery delay in milliseconds after a cache read or SHM frame upload error.
 const FRAME_ERROR_RETRY_MS: u64 = 100;
 
+// Poll interval in milliseconds while waiting for initial audio prefill before frame 0 advances.
+const AUDIO_PREFILL_POLL_MS: u64 = 10;
+
 impl OverlayRuntime
 {
     /// Requests a Wayland frame callback on `image_surface` and commits immediately.
@@ -48,6 +51,13 @@ impl OverlayRuntime
             return;
         }
 
+        if !self.audio_gate_open()
+        {
+            self.schedule_frame_timer(Duration::from_millis(AUDIO_PREFILL_POLL_MS));
+            return;
+        }
+
+        let prev_index = self.playback.current_index();
         let now_us = self.start_instant.elapsed().as_secs_f64() * 1_000_000.0;
         let (step, wait_us, frame_count, decode_done) =
             self.cache.with_delays_us(|delays_us, decode_done| {
@@ -71,7 +81,15 @@ impl OverlayRuntime
         {
             TickOutcome::StopCallbacks =>
             {}
-            TickOutcome::FrameChanged(idx) => self.present_frame_at(idx),
+            TickOutcome::FrameChanged(idx) =>
+            {
+                if idx < prev_index
+                    && let Some(audio) = &self.audio
+                {
+                    audio.notify_loop_restart();
+                }
+                self.present_frame_at(idx);
+            }
             TickOutcome::NoChange =>
             {
                 if let Some(delay_us) = wait_us
@@ -80,6 +98,31 @@ impl OverlayRuntime
                 }
             }
         }
+    }
+
+    /// Holds frame 0 until audio prefill finishes (or its grace period ends), then aligns audio to 0.
+    ///
+    /// Returns `true` once playback may advance. Without audio the gate is always open.
+    fn audio_gate_open(&mut self) -> bool
+    {
+        if self.audio_started
+        {
+            return true;
+        }
+        let Some(audio) = &self.audio
+        else
+        {
+            return true;
+        };
+        if !audio.is_startup_ready(Instant::now())
+        {
+            return false;
+        }
+
+        // Restart audio at sample 0 so it begins together with frame 0's deadline.
+        audio.notify_loop_restart();
+        self.audio_started = true;
+        true
     }
 
     /// Fetches frame `idx` from display cache or `FrameCache`, uploads it to SHM, and requests callback.

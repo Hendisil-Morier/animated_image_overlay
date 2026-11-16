@@ -27,8 +27,9 @@ use wayland_client::{
 
 // Core subsystems, input state, cursor types, Wayland scene, and `--stats` telemetry types.
 use crate::{
+    audio::AudioEngine,
     cache::FrameCache,
-    config::ConfigStore,
+    config::{AudioPrefs, ConfigStore},
     layout::OverlayLayout,
     playback::PlaybackClock,
     wayland::{
@@ -85,6 +86,15 @@ pub(crate) struct OverlayRuntime
 
     // LZ4 disk cache and configurable RAM LRU store feeding rendered animation frames.
     pub(crate) cache: FrameCache,
+
+    // Optional synchronized audio output (embedded video track or `--audio` companion file).
+    pub(crate) audio: Option<AudioEngine>,
+
+    // Live volume and mute preferences persisted alongside geometry when audio is attached.
+    pub(crate) audio_prefs: AudioPrefs,
+
+    // Set once playback released the initial audio prefill gate and aligned audio to frame 0.
+    pub(crate) audio_started: bool,
 
     // Fullscreen layer surface, frame ring, and corner-handle/border subsurfaces.
     pub(crate) scene: Option<OverlayScene>,
@@ -278,9 +288,10 @@ impl OverlayRuntime
         self.dirty_save = false;
 
         let current_state = self.layout.state();
-        if let Err(err) = self
-            .config_store
-            .save_state_entry(&self.config_key, current_state)
+        let audio_prefs = self.audio.is_some().then_some(self.audio_prefs);
+        if let Err(err) =
+            self.config_store
+                .save_overlay_and_audio(&self.config_key, current_state, audio_prefs)
         {
             tracing::warn!(error = %err, "Failed saving overlay state");
         }
@@ -321,6 +332,10 @@ impl OverlayRuntime
         self.cancel_save_timer();
         self.cancel_stats_timer();
         self.flush_pending_save();
+        if let Some(audio) = &mut self.audio
+        {
+            audio.stop();
+        }
         self.cache.stop();
         tracing::info!("Wayland overlay shutdown cleanup complete");
     }

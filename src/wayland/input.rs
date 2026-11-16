@@ -96,6 +96,12 @@ pub struct InputEffects
     /// Pause or resume animation playback callbacks.
     pub toggle_pause: bool,
 
+    /// Flip audio mute state (`m`).
+    pub toggle_mute: bool,
+
+    /// Signed audio volume step count to apply (`.` / `,`), `0` when unchanged.
+    pub volume_steps: i8,
+
     /// Terminate the overlay cleanly.
     pub quit: bool,
 }
@@ -475,6 +481,16 @@ impl InputState
             KeyShortcut::TogglePause =>
             {
                 effects.toggle_pause = true;
+            }
+            KeyShortcut::ToggleMute =>
+            {
+                effects.toggle_mute = true;
+                effects.schedule_save = true;
+            }
+            KeyShortcut::AdjustVolume { steps } =>
+            {
+                effects.volume_steps = steps;
+                effects.schedule_save = true;
             }
         }
 
