@@ -574,6 +574,9 @@ impl ApngCompositor
         patch: DecodedApngPatch,
     ) -> Result<RawRgbaFrame, CacheError>
     {
+        // W3C APNG requires executing the prior frame's disposal (e.g. `DISPOSE_BACKGROUND` clear)
+        // before snapshotting the canvas for an incoming frame marked `DISPOSE_PREVIOUS`
+        // (unlike `image-0.25.10`'s `ApngDecoder::mix_next_frame`, which snapshots prior to disposal).
         if let Some(prev) = self.pending_dispose.take()
         {
             self.dispose_previous_region(prev);
