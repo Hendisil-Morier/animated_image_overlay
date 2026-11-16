@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Performance
+
+- Parallelized per-frame APNG PNG decompression across the bounded worker pool (`src/decode/apng.rs`, `src/decode/codecs.rs`, `src/decode/pipeline.rs`, `src/decode/stream.rs`), splitting raw `fcTL`/`fdAT` packets sequentially via `ApngPacketReader`, inflating per-frame patches in parallel via `decode_apng_packet`, compositing blend and dispose operations in strict sequence via `ApngCompositor`, and prioritizing ready raw canvas encoding ahead of packet inflation to keep memory bounded and prevent pipeline stalls.
+
 ## [0.3.2] - 2026-11-16
 
 ### Added
