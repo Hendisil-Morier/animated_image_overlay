@@ -1,4 +1,4 @@
-//! Runtime state coordinator managing timers, cursor updates, debounced saves, and cleanup.
+//! Runtime struct, `calloop` timer scheduling, stats snapshotting, pointer cursor, and cleanup.
 
 // Monotonic timing and timeouts for debounce and handle fade timers.
 use std::time::{Duration, Instant};
@@ -8,9 +8,9 @@ use calloop::{
     LoopHandle, RegistrationToken,
     timer::{TimeoutAction, Timer},
 };
-// SCTK registry, compositor, outputs, seat devices, SHM, and themed pointer cursor support.
+// SCTK compositor, outputs, registry, seat, SHM, and themed pointer cursor support.
 use smithay_client_toolkit::{
-    compositor::{CompositorState, FrameCallbackData},
+    compositor::CompositorState,
     output::OutputState,
     registry::RegistryState,
     seat::{
@@ -25,21 +25,18 @@ use wayland_client::{
     protocol::{wl_keyboard::WlKeyboard, wl_surface::WlSurface},
 };
 
-// Frame cache, config store, layout math, playback clock, input state, Wayland scene, and stats.
-use super::{
-    input::{HANDLE_FADE_MS, InputEffects, InputState, PointerCursor, SAVE_DEBOUNCE_MS},
-    scene::OverlayScene,
-    stats::{OverlayStats, STATS_INTERVAL_MS, StatsSnapshot},
-};
+// Core subsystems, input state, cursor types, Wayland scene, and `--stats` telemetry types.
 use crate::{
     cache::FrameCache,
     config::ConfigStore,
     layout::OverlayLayout,
-    playback::{PlaybackClock, PlaybackStep, TickOutcome},
+    playback::PlaybackClock,
+    wayland::{
+        input::{HANDLE_FADE_MS, InputState, PointerCursor, SAVE_DEBOUNCE_MS},
+        scene::OverlayScene,
+        stats::{OverlayStats, STATS_INTERVAL_MS, StatsSnapshot},
+    },
 };
-
-// Recovery delay in milliseconds after a cache read or SHM frame upload error.
-const FRAME_ERROR_RETRY_MS: u64 = 100;
 
 /// Active Wayland protocol state, timers, and overlay lifecycle coordinator.
 pub(crate) struct OverlayRuntime
@@ -134,254 +131,6 @@ pub(crate) struct OverlayRuntime
 
 impl OverlayRuntime
 {
-    /// Requests a Wayland frame callback on `image_surface` and commits immediately.
-    pub(crate) fn queue_image_frame_callback(&mut self)
-    {
-        if let Some(scene) = &self.scene
-        {
-            self.frame_callback_pending = true;
-            scene
-                .image_surface
-                .frame(&self.qh, FrameCallbackData(scene.image_surface.clone()));
-            scene.image_surface.commit();
-        }
-    }
-
-    /// Starts or resumes timer-paced animation ticks when configured and unpaused.
-    pub(crate) fn schedule_playback_if_needed(&mut self)
-    {
-        if !self.configured || self.frame_callback_pending || self.playback.is_paused()
-        {
-            return;
-        }
-
-        self.tick_playback();
-    }
-
-    /// Advances playback with borrowed cache delays and presents or arms the next wait timer.
-    pub(crate) fn tick_playback(&mut self)
-    {
-        self.cancel_frame_timer();
-        if !self.configured || self.frame_callback_pending
-        {
-            return;
-        }
-
-        let now_us = self.start_instant.elapsed().as_secs_f64() * 1_000_000.0;
-        let (step, wait_us, frame_count, decode_done) =
-            self.cache.with_delays_us(|delays_us, decode_done| {
-                let step = self
-                    .playback
-                    .advance_us_with_stats(now_us, delays_us, decode_done);
-                let wait_us = if matches!(step.outcome, TickOutcome::NoChange)
-                {
-                    self.playback.us_until_next_frame(now_us)
-                }
-                else
-                {
-                    None
-                };
-                (step, wait_us, delays_us.len(), decode_done)
-            });
-
-        self.record_tick_stats(step, frame_count, decode_done);
-
-        match step.outcome
-        {
-            TickOutcome::StopCallbacks =>
-            {}
-            TickOutcome::FrameChanged(idx) => self.present_frame_at(idx),
-            TickOutcome::NoChange =>
-            {
-                if let Some(delay_us) = wait_us
-                {
-                    self.schedule_frame_timer(Duration::from_micros(delay_us.max(1)));
-                }
-            }
-        }
-    }
-
-    /// Fetches frame `idx` from display cache or `FrameCache`, uploads it to SHM, and requests callback.
-    fn present_frame_at(&mut self, idx: usize)
-    {
-        let Some(scene) = &mut self.scene
-        else
-        {
-            return;
-        };
-
-        let stage_start = self.stats.is_some().then(Instant::now);
-        let staged = scene.stage_frame_cached(&self.shm, &self.layout, &self.cache, idx);
-
-        match staged
-        {
-            Ok(_retired_ring) =>
-            {
-                if let (Some(start), Some(stats)) = (stage_start, &mut self.stats)
-                {
-                    stats.record_presented(start.elapsed());
-                }
-                self.queue_image_frame_callback();
-            }
-            Err(err) =>
-            {
-                tracing::warn!(error = %err, frame_index = idx, "Failed presenting frame");
-                self.schedule_frame_timer(Duration::from_millis(FRAME_ERROR_RETRY_MS));
-            }
-        }
-    }
-
-    /// Updates `--stats` tick counters and logs cold-decode completion the instant it finishes.
-    fn record_tick_stats(&mut self, step: PlaybackStep, frame_count: usize, decode_done: bool)
-    {
-        let Some(stats) = &mut self.stats
-        else
-        {
-            return;
-        };
-        stats.record_tick(step);
-        if let Some(msg) = stats.check_decode_completion(Instant::now(), frame_count, decode_done)
-        {
-            println!("{msg}");
-        }
-    }
-
-    /// Resamples and atomically commits the current playback frame for updated orientation or scale.
-    pub(crate) fn refresh_active_oriented_frame(&mut self)
-    {
-        let Some(scene) = &mut self.scene
-        else
-        {
-            return;
-        };
-
-        let frame_idx = self.playback.current_index();
-        let refreshed = scene.refresh_frame_cached(
-            &self.compositor,
-            &self.shm,
-            &self.layout,
-            &self.input,
-            &self.cache,
-            frame_idx,
-        );
-        if let Err(err) = refreshed
-        {
-            tracing::warn!(
-                error = %err,
-                frame_index = frame_idx,
-                "Failed refreshing rotated Wayland frame"
-            );
-        }
-    }
-
-    /// Applies non-scene effects (`quit`, edit logging, timers, pause) and returns whether shutdown started.
-    pub(crate) fn apply_immediate_effects(&mut self, effects: InputEffects) -> bool
-    {
-        if effects.quit
-        {
-            self.exit_requested = true;
-            return true;
-        }
-
-        if let Some(editing) = effects.edit_mode_changed
-        {
-            tracing::debug!(editing, "Toggled edit mode");
-        }
-
-        self.sync_timers_for_effects(effects);
-
-        if effects.toggle_pause
-        {
-            self.apply_pause_toggle();
-        }
-
-        false
-    }
-
-    /// Applies immediate side effects and synchronizes surfaces, buffers, and corner handle.
-    pub(crate) fn apply_input_effects(&mut self, effects: InputEffects)
-    {
-        if self.apply_immediate_effects(effects)
-        {
-            return;
-        }
-
-        self.sync_scene_for_effects(effects);
-    }
-
-    /// Synchronizes surface layout, resampled frame buffers, or corner handle opacity after input.
-    pub(crate) fn sync_scene_for_effects(&mut self, effects: InputEffects)
-    {
-        let needs_redraw = effects.frame_redraw_needed
-            || (effects.layout_changed
-                && !self.input.is_resizing()
-                && self
-                    .scene
-                    .as_ref()
-                    .is_some_and(|scene| scene.needs_buffer_resync(&self.layout, &self.cache)));
-        if needs_redraw
-        {
-            self.refresh_active_oriented_frame();
-            return;
-        }
-
-        let Some(scene) = &mut self.scene
-        else
-        {
-            return;
-        };
-
-        if effects.layout_changed || effects.edit_mode_changed.is_some()
-        {
-            if let Err(err) =
-                scene.sync_layout(&self.compositor, &self.shm, &self.layout, &self.input)
-            {
-                tracing::warn!(error = %err, "Failed syncing Wayland overlay layout");
-            }
-            return;
-        }
-
-        if effects.handle_visual_changed
-            && let Err(err) = scene.sync_handle_only(&self.layout, &self.input)
-        {
-            tracing::warn!(error = %err, "Failed syncing corner handle visuals");
-        }
-    }
-
-    /// Arms or cancels the handle auto-fade timer and debounced config write timer.
-    fn sync_timers_for_effects(&mut self, effects: InputEffects)
-    {
-        if effects.cancel_fade_timer
-        {
-            self.cancel_fade_timer();
-        }
-        else if effects.reset_fade_timer
-        {
-            self.schedule_fade_timer();
-        }
-
-        if effects.schedule_save
-        {
-            self.dirty_save = true;
-            self.schedule_save_timer();
-        }
-    }
-
-    /// Toggles animation pause state and arms or cancels frame wakeup timers accordingly.
-    fn apply_pause_toggle(&mut self)
-    {
-        let paused = self.playback.toggle_pause();
-        tracing::debug!(paused, "Toggled playback pause");
-        if paused
-        {
-            self.cancel_frame_timer();
-        }
-        else
-        {
-            self.schedule_playback_if_needed();
-        }
-    }
-
     /// Arms or replaces the one-shot animation frame timer for `delay`.
     pub(crate) fn schedule_frame_timer(&mut self, delay: Duration)
     {
