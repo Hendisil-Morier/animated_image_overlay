@@ -353,8 +353,8 @@ fn cli_parses_gpu_options()
     {
         OverlayError::CliValidation(msg) =>
         {
-            assert!(msg.contains("Unsupported --gpu mode 'asccasdweenn'"));
-            assert!(msg.contains("Supported modes:"));
+            assert!(msg.contains("Unknown --gpu mode 'asccasdweenn'"));
+            assert!(msg.contains("Recognized options:"));
         }
         other => panic!("expected CliValidation, got {other:?}"),
     }

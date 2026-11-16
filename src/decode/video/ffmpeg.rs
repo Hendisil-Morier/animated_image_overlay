@@ -53,6 +53,9 @@ struct FfmpegChildGuard
 
     // Joined `stderr` line reader delivering `ShowInfoTiming` and trailing errors.
     stderr_thread: Option<JoinHandle<Vec<String>>>,
+
+    // Active GPU acceleration backend option passed to ffmpeg.
+    gpu: Option<String>,
 }
 
 /// Strips bracketed logger prefixes such as `[vist#0:0 @ 0x...]` from an `ffmpeg` stderr line.
@@ -71,9 +74,15 @@ fn sanitize_ffmpeg_stderr_line(line: &str) -> &str
 }
 
 /// Formats trailing stderr diagnostic lines into a clean, human-readable summary.
-fn format_ffmpeg_error(status: std::process::ExitStatus, tail: &[String]) -> String
+fn format_ffmpeg_error(
+    status: std::process::ExitStatus,
+    tail: &[String],
+    gpu: Option<&str>,
+) -> String
 {
     let mut cleaned: Vec<&str> = Vec::new();
+    let mut missing_device = false;
+
     for line in tail
     {
         let s = sanitize_ffmpeg_stderr_line(line);
@@ -82,6 +91,10 @@ fn format_ffmpeg_error(status: std::process::ExitStatus, tail: &[String]) -> Str
             || s.starts_with("Trailing option(s) found")
         {
             continue;
+        }
+        if s.contains("No device available for decoder") || s.contains("Device creation failed")
+        {
+            missing_device = true;
         }
         if !cleaned.contains(&s)
         {
@@ -95,7 +108,16 @@ fn format_ffmpeg_error(status: std::process::ExitStatus, tail: &[String]) -> Str
     }
     else
     {
-        cleaned.join("; ")
+        let mut msg = cleaned.join("; ");
+        if missing_device
+            && let Some(mode) = gpu
+            && mode != "auto"
+            && mode != "none"
+            && mode != "off"
+        {
+            msg.push_str(" (hint: hardware backend unavailable on this host; use '--gpu auto' or '--gpu none')");
+        }
+        msg
     }
 }
 
@@ -125,7 +147,7 @@ impl FfmpegChildGuard
             return Ok(());
         }
 
-        let summary = format_ffmpeg_error(status, &tail);
+        let summary = format_ffmpeg_error(status, &tail, self.gpu.as_deref());
         Err(CacheError::Decode {
             path: path.to_path_buf(),
             reason: summary,
@@ -261,6 +283,7 @@ pub(crate) fn open_video_frames(
         child_guard: FfmpegChildGuard {
             child: Some(child),
             stderr_thread: Some(stderr_thread),
+            gpu: probe.gpu.clone(),
         },
     })
 }

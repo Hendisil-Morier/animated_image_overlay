@@ -381,7 +381,7 @@ impl CliArgs
         if !SUPPORTED_GPU_MODES.contains(&gpu_mode.as_str())
         {
             return Err(OverlayError::CliValidation(format!(
-                "Unsupported --gpu mode '{}'. Supported modes: {}",
+                "Unknown --gpu mode '{}'. Recognized options: {}",
                 self.gpu.trim(),
                 SUPPORTED_GPU_MODES.join(", ")
             )));
