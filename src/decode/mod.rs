@@ -1,5 +1,8 @@
 //! Multi-format streaming frame decoder converting images to Wayland `ARGB8888`.
 
+// Streaming APNG chunk splitter, independent frame decoder, and sequential compositor.
+pub mod apng;
+
 // Container format detection and frame iterators across APNG, GIF, WebP, and still images.
 pub mod codecs;
 

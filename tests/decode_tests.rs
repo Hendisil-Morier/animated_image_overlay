@@ -3,6 +3,7 @@
 
 use std::{
     fs::{self, File},
+    io::{BufReader, Seek},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -14,6 +15,7 @@ use std::{
 use animated_image_widget::{
     decode::{
         DecodedFirstFrame, EncodedFrame, FrameDecoder, FrameStreamSink,
+        apng::{ApngCompositor, ApngPacketReader, decode_apng_packet},
         resize_premultiplied_argb8888, rotate_argb8888_into,
         straight_rgba_to_premultiplied_argb8888,
     },
@@ -21,8 +23,12 @@ use animated_image_widget::{
 };
 use fast_image_resize::Resizer;
 use image::{
-    Delay, Frame as ImgFrame, ImageEncoder, RgbaImage,
-    codecs::{bmp::BmpEncoder, gif::GifEncoder, png::PngEncoder},
+    AnimationDecoder, Delay, Frame as ImgFrame, ImageEncoder, RgbaImage,
+    codecs::{
+        bmp::BmpEncoder,
+        gif::GifEncoder,
+        png::{PngDecoder, PngEncoder},
+    },
 };
 use lz4_flex::decompress_size_prepended;
 use webp_animation::Encoder as WebpEncoder;
@@ -996,5 +1002,402 @@ fn decode_stops_pipeline_cleanly_on_midstream_cancel_and_sink_error()
             .finish_err
             .as_deref()
             .is_some_and(|msg| msg.contains("Injected sink failure"))
+    );
+}
+
+#[derive(Clone, Copy)]
+struct SyntheticPatchSpec
+{
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    rgba: [u8; 4],
+    delay_num: u16,
+    delay_den: u16,
+    dispose_op: u8,
+    blend_op: u8,
+}
+
+fn png_test_helpers_encode(
+    canvas_w: u32,
+    canvas_h: u32,
+    color_type: u8,
+    extra_chunks: &[(&[u8; 4], &[u8])],
+    hidden_thumbnail: Option<&[u8]>,
+    patches: &[SyntheticPatchSpec],
+) -> Vec<u8>
+{
+    fn crc32(bytes: &[u8]) -> u32
+    {
+        let mut crc = 0xFFFF_FFFF_u32;
+        for &b in bytes
+        {
+            crc ^= u32::from(b);
+            for _ in 0..8
+            {
+                let mask = (crc & 1).wrapping_neg() & 0xEDB8_8320;
+                crc = (crc >> 1) ^ mask;
+            }
+        }
+        !crc
+    }
+
+    fn adler32(bytes: &[u8]) -> u32
+    {
+        let mut a = 1_u32;
+        let mut b = 0_u32;
+        for &byte in bytes
+        {
+            a = (a + u32::from(byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        (b << 16) | a
+    }
+
+    fn zlib_stored(raw: &[u8]) -> Vec<u8>
+    {
+        let len = raw.len() as u16;
+        let mut out = vec![0x78, 0x01, 0x01];
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
+        out.extend_from_slice(raw);
+        out.extend_from_slice(&adler32(raw).to_be_bytes());
+        out
+    }
+
+    fn push_chunk(out: &mut Vec<u8>, tag: &[u8; 4], data: &[u8])
+    {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(tag);
+        out.extend_from_slice(data);
+        let mut crc_input = Vec::with_capacity(4 + data.len());
+        crc_input.extend_from_slice(tag);
+        crc_input.extend_from_slice(data);
+        out.extend_from_slice(&crc32(&crc_input).to_be_bytes());
+    }
+
+    let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&canvas_w.to_be_bytes());
+    ihdr.extend_from_slice(&canvas_h.to_be_bytes());
+    ihdr.extend_from_slice(&[8, color_type, 0, 0, 0]);
+    push_chunk(&mut out, b"IHDR", &ihdr);
+
+    for (tag, data) in extra_chunks
+    {
+        push_chunk(&mut out, tag, data);
+    }
+
+    let mut actl = Vec::new();
+    actl.extend_from_slice(&(patches.len() as u32).to_be_bytes());
+    actl.extend_from_slice(&0_u32.to_be_bytes());
+    push_chunk(&mut out, b"acTL", &actl);
+
+    if let Some(thumb_scanlines) = hidden_thumbnail
+    {
+        push_chunk(&mut out, b"IDAT", &zlib_stored(thumb_scanlines));
+    }
+
+    let mut seq = 0_u32;
+    for (idx, p) in patches.iter().enumerate()
+    {
+        let mut fctl = Vec::with_capacity(26);
+        fctl.extend_from_slice(&seq.to_be_bytes());
+        seq += 1;
+        fctl.extend_from_slice(&p.w.to_be_bytes());
+        fctl.extend_from_slice(&p.h.to_be_bytes());
+        fctl.extend_from_slice(&p.x.to_be_bytes());
+        fctl.extend_from_slice(&p.y.to_be_bytes());
+        fctl.extend_from_slice(&p.delay_num.to_be_bytes());
+        fctl.extend_from_slice(&p.delay_den.to_be_bytes());
+        fctl.push(p.dispose_op);
+        fctl.push(p.blend_op);
+        push_chunk(&mut out, b"fcTL", &fctl);
+
+        let mut raw = Vec::new();
+        for _row in 0..p.h
+        {
+            raw.push(0);
+            for _col in 0..p.w
+            {
+                if color_type == 3
+                {
+                    raw.push(p.rgba[0]);
+                }
+                else
+                {
+                    raw.extend_from_slice(&p.rgba);
+                }
+            }
+        }
+        let compressed = zlib_stored(&raw);
+        if idx == 0 && hidden_thumbnail.is_none()
+        {
+            push_chunk(&mut out, b"IDAT", &compressed);
+        }
+        else
+        {
+            let mut fdat = Vec::with_capacity(4 + compressed.len());
+            fdat.extend_from_slice(&seq.to_be_bytes());
+            seq += 1;
+            fdat.extend_from_slice(&compressed);
+            push_chunk(&mut out, b"fdAT", &fdat);
+        }
+    }
+
+    push_chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+#[test]
+fn apng_packet_reader_and_compositor_match_image_crate_across_blend_and_dispose_modes()
+{
+    let temp = TempDecodeDir::new("apng_parity");
+    let apng_path = temp.path().join("complex.apng");
+    let patches = [
+        SyntheticPatchSpec {
+            x: 0,
+            y: 0,
+            w: 6,
+            h: 6,
+            rgba: [20, 40, 80, 255],
+            delay_num: 1,
+            delay_den: 60,
+            dispose_op: 0, // None
+            blend_op: 0,   // Source
+        },
+        SyntheticPatchSpec {
+            x: 1,
+            y: 1,
+            w: 4,
+            h: 4,
+            rgba: [200, 10, 30, 128],
+            delay_num: 1,
+            delay_den: 120,
+            dispose_op: 2, // Previous (reverts back to Frame 0 before Frame 2)
+            blend_op: 1,   // Over
+        },
+        SyntheticPatchSpec {
+            x: 2,
+            y: 2,
+            w: 3,
+            h: 3,
+            rgba: [10, 220, 40, 200],
+            delay_num: 2,
+            delay_den: 0,  // 0 => 100 (20 ms)
+            dispose_op: 1, // Background (clears (2,2,3,3) before Frame 3)
+            blend_op: 1,   // Over
+        },
+        SyntheticPatchSpec {
+            x: 0,
+            y: 0,
+            w: 2,
+            h: 2,
+            rgba: [255, 255, 255, 180],
+            delay_num: 1,
+            delay_den: 240,
+            dispose_op: 0,
+            blend_op: 0, // Source
+        },
+    ];
+    fs::write(
+        &apng_path,
+        png_test_helpers_encode(6, 6, 6, &[], None, &patches),
+    )
+    .unwrap();
+
+    let ref_frames: Vec<_> = PngDecoder::new(BufReader::new(File::open(&apng_path).unwrap()))
+        .unwrap()
+        .apng()
+        .unwrap()
+        .into_frames()
+        .map(|f| f.unwrap().into_buffer().into_raw())
+        .collect();
+
+    let mut reader =
+        ApngPacketReader::try_open(&apng_path, BufReader::new(File::open(&apng_path).unwrap()))
+            .unwrap()
+            .unwrap_or_else(|_| panic!("valid APNG must open cleanly"));
+    let header = reader.header();
+    let mut compositor = ApngCompositor::new(header.canvas_w, header.canvas_h).unwrap();
+
+    let mut actual_frames = Vec::new();
+    let mut actual_delays = Vec::new();
+    while let Some(packet) = reader.next_packet().unwrap()
+    {
+        let patch = decode_apng_packet(&apng_path, &header, packet).unwrap();
+        let (delay_us, rgba) = compositor.apply_patch_rgba(patch).unwrap();
+        actual_delays.push(delay_us);
+        actual_frames.push(rgba);
+    }
+
+    assert_eq!(actual_frames.len(), ref_frames.len());
+    assert_eq!(actual_delays, vec![16_667, 8_333, 20_000, 4_167]);
+    for (idx, (actual, expected)) in actual_frames.iter().zip(ref_frames.iter()).enumerate()
+    {
+        assert_eq!(actual, expected, "canvas mismatch at frame {idx}");
+    }
+}
+
+#[test]
+fn apng_packet_reader_handles_indexed_palette_hidden_thumbnail_and_static_rewind()
+{
+    let temp = TempDecodeDir::new("apng_palette_thumb");
+    let apng_path = temp.path().join("indexed_hidden.apng");
+
+    // 2 palette colors: idx 0 = [255, 0, 0] with alpha 128, idx 1 = [0, 200, 50] with alpha 255.
+    let plte = [255_u8, 0, 0, 0, 200, 50];
+    let trns = [128_u8, 255];
+    // Hidden 4x4 fallback IDAT thumbnail preceding frame 0's fcTL.
+    let thumb_raw = [0_u8, 1, 1, 1, 1].repeat(4);
+    let patches = [
+        SyntheticPatchSpec {
+            x: 0,
+            y: 0,
+            w: 4,
+            h: 4,
+            rgba: [0, 0, 0, 0], // palette idx 0
+            delay_num: 1,
+            delay_den: 60,
+            dispose_op: 0,
+            blend_op: 0,
+        },
+        SyntheticPatchSpec {
+            x: 1,
+            y: 1,
+            w: 2,
+            h: 2,
+            rgba: [1, 0, 0, 0], // palette idx 1
+            delay_num: 1,
+            delay_den: 60,
+            dispose_op: 0,
+            blend_op: 1,
+        },
+    ];
+    let encoded = png_test_helpers_encode(
+        4,
+        4,
+        3, // indexed
+        &[(b"PLTE", &plte), (b"tRNS", &trns)],
+        Some(&thumb_raw),
+        &patches,
+    );
+    fs::write(&apng_path, encoded).unwrap();
+
+    let ref_frames: Vec<_> = PngDecoder::new(BufReader::new(File::open(&apng_path).unwrap()))
+        .unwrap()
+        .apng()
+        .unwrap()
+        .into_frames()
+        .map(|f| f.unwrap().into_buffer().into_raw())
+        .collect();
+
+    let mut reader =
+        ApngPacketReader::try_open(&apng_path, BufReader::new(File::open(&apng_path).unwrap()))
+            .unwrap()
+            .unwrap_or_else(|_| panic!("indexed APNG should open"));
+    let header = reader.header();
+    let mut compositor = ApngCompositor::new(header.canvas_w, header.canvas_h).unwrap();
+    let mut actual_frames = Vec::new();
+    while let Some(packet) = reader.next_packet().unwrap()
+    {
+        let patch = decode_apng_packet(&apng_path, &header, packet).unwrap();
+        let (_delay, rgba) = compositor.apply_patch_rgba(patch).unwrap();
+        actual_frames.push(rgba);
+    }
+    assert_eq!(actual_frames, ref_frames);
+
+    // Non-animated PNG rewinds cleanly back to byte offset 0.
+    let static_path = temp.path().join("static.png");
+    let static_img = RgbaImage::from_pixel(8, 8, image::Rgba([9, 80, 200, 255]));
+    PngEncoder::new(File::create(&static_path).unwrap())
+        .write_image(&static_img, 8, 8, image::ExtendedColorType::Rgba8)
+        .unwrap();
+
+    let fallback = ApngPacketReader::try_open(
+        &static_path,
+        BufReader::new(File::open(&static_path).unwrap()),
+    )
+    .unwrap();
+    let mut rewound = match fallback
+    {
+        Ok(_) => panic!("static PNG must not be identified as APNG"),
+        Err(buf) => buf,
+    };
+    assert_eq!(rewound.stream_position().unwrap(), 0);
+    assert!(PngDecoder::new(rewound).is_ok());
+
+    // W3C APNG spec: Background disposal clears region before a subsequent Previous snapshot.
+    let bg_then_prev = temp.path().join("bg_then_prev.apng");
+    let seq_patches = [
+        SyntheticPatchSpec {
+            x: 0,
+            y: 0,
+            w: 4,
+            h: 4,
+            rgba: [10, 20, 30, 255],
+            delay_num: 1,
+            delay_den: 60,
+            dispose_op: 0, // None
+            blend_op: 0,
+        },
+        SyntheticPatchSpec {
+            x: 1,
+            y: 1,
+            w: 2,
+            h: 2,
+            rgba: [200, 50, 60, 255],
+            delay_num: 1,
+            delay_den: 60,
+            dispose_op: 1, // Background: clears (1,1,2,2) to [0,0,0,0] before frame 2
+            blend_op: 0,
+        },
+        SyntheticPatchSpec {
+            x: 1,
+            y: 1,
+            w: 2,
+            h: 2,
+            rgba: [0, 200, 0, 255],
+            delay_num: 1,
+            delay_den: 60,
+            dispose_op: 2, // Previous: must restore [0,0,0,0] before frame 3, not frame 1
+            blend_op: 0,
+        },
+        SyntheticPatchSpec {
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1,
+            rgba: [255, 255, 255, 255],
+            delay_num: 1,
+            delay_den: 60,
+            dispose_op: 0,
+            blend_op: 0,
+        },
+    ];
+    fs::write(
+        &bg_then_prev,
+        png_test_helpers_encode(4, 4, 6, &[], None, &seq_patches),
+    )
+    .unwrap();
+    let mut spec_reader = ApngPacketReader::try_open(
+        &bg_then_prev,
+        BufReader::new(File::open(&bg_then_prev).unwrap()),
+    )
+    .unwrap()
+    .unwrap_or_else(|_| panic!("spec APNG should open"));
+    let spec_header = spec_reader.header();
+    let mut spec_comp = ApngCompositor::new(spec_header.canvas_w, spec_header.canvas_h).unwrap();
+    let mut frames_out = Vec::new();
+    while let Some(pkt) = spec_reader.next_packet().unwrap()
+    {
+        let decoded = decode_apng_packet(&bg_then_prev, &spec_header, pkt).unwrap();
+        frames_out.push(spec_comp.apply_patch_rgba(decoded).unwrap().1);
+    }
+    let center_offset = (4 + 1) * 4;
+    assert_eq!(
+        &frames_out[3][center_offset..center_offset + 4],
+        &[0, 0, 0, 0]
     );
 }
