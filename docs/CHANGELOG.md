@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [0.4.1] - 2026-11-16
+
+### Removed
+
+- Removed the legacy `-r` / `--ram-cache-mb` CLI flag in favor of the unified `-c ram=<MB>` cap option.
+
 ## [0.4.0] - 2026-11-16
 
 ### Added
@@ -21,10 +27,6 @@ All notable changes to this project are documented here.
 ### Changed
 
 - Split multi-role source modules and oversized integration test suites along domain boundaries while preserving all public API paths via pure `mod.rs` facades: decomposed `src/decode/apng/` (`reader.rs`, `patch.rs`, `compositor.rs`), `src/decode/pipeline/` (`coordinator.rs`, `stages.rs`), `src/decode/pixel/` (`frame.rs`, `rotate.rs`), and `src/wayland/runtime/` (`state.rs`, `playback.rs`, `effects.rs`, moving `handle_pointer_event` out of `src/wayland/handlers.rs`), plus split `tests/decode_tests.rs` and `tests/wayland_input_tests.rs` across `tests/support/mod.rs` (unifying duplicate synthetic APNG fixtures), `tests/pixel_tests.rs`, `tests/apng_tests.rs`, and `tests/wayland_ui_tests.rs`.
-
-### Removed
-
-- Removed legacy `-r` / `--ram-cache-mb` CLI flag in favor of the unified `-c ram=<MB>` cap option.
 
 ### Documentation
 
