@@ -1,31 +1,71 @@
-
-
-name: Rust
+name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main, master]
   pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
-jobs:
-  build:
+  RUST_BACKTRACE: 1
 
+jobs:
+  build-and-test:
+    name: Build & Test
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Install ALSA dev libraries
-      run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
-    - name: Install XKB / Wayland dev libraries
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libxkbcommon-dev libwayland-dev pkg-config
-    - name: Build
-      run: cargo build --verbose
-    - name: Cache
-      uses: actions/cache@v6.1.0
-    - name: Run tests
-      run: cargo test --verbose
+      # 1. Checkout
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. System libraries required by alsa-sys, smithay-client-toolkit, etc.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            pkg-config
+
+      # 3. Rust toolchain (with rustfmt and clippy components)
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # 4. Cache Cargo registry, git deps, and build artifacts
+      #    rust-cache automatically prunes your own crate's artifacts
+      #    while keeping compiled dependencies, keyed on Cargo.lock, toolchain, etc.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      # 6. Lint (compiles, catches warnings as errors)
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # 7. Build
+      - name: Build
+        run: cargo build --all-features --verbose
+
+      # 8. Install cargo-nextest (faster, clearer test runner)
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      # 9. Run tests
+      - name: Run tests
+        run: cargo nextest run --all-features --no-fail-fast
+
+      # 10. Upload logs / artifacts on failure for debugging
+      - name: Upload test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-artifacts
+          path: |
+            target/nextest/**/*.xml
+            target/debug/deps/*.log
+          if-no-files-found: ignore
+          retention-days: 7
