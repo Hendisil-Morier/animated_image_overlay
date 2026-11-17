@@ -34,6 +34,71 @@ pub struct BufferTargetSpec
     pub cache_key: Option<DisplayCacheKey>,
 }
 
+/// Computes target SHM buffer dimensions and optional cache key for discrete quarter-turn orientations.
+fn compute_quarter_turn_target_spec(
+    layout: &OverlayLayout,
+    quarter: crate::layout::Rotation,
+    display_cache: &DisplayFrameCache,
+    clamped_scale: u32,
+    frame_count: usize,
+    decode_done: bool,
+    fits_source_ram: bool,
+) -> BufferTargetSpec
+{
+    let (ov_w, ov_h) = layout.overlay_size();
+    let (frame_w, frame_h) = layout.frame_size();
+    let (scaled_w, scaled_h) = clamped_physical_size(
+        quarter.orient_dimensions(ov_w, ov_h),
+        clamped_scale,
+        (frame_w, frame_h),
+    );
+
+    // If dimensions match unscaled frame size, no downscaling or caching applies.
+    if (scaled_w, scaled_h) == (frame_w, frame_h)
+    {
+        return BufferTargetSpec {
+            width: frame_w,
+            height: frame_h,
+            cache_key: None,
+        };
+    }
+
+    // Completed single-frame overlays have no animation ticks, so downscale cleanly
+    // with Lanczos3 directly into SHM without occupying DisplayFrameCache slots.
+    if decode_done && frame_count == 1
+    {
+        return BufferTargetSpec {
+            width: scaled_w,
+            height: scaled_h,
+            cache_key: None,
+        };
+    }
+
+    // Multi-frame quarter-turn loops downscale only when source frames exceed RAM budget
+    // and the scaled sequence fits inside `-c display`.
+    if !fits_source_ram && display_cache.would_fit(scaled_w, scaled_h, frame_count, decode_done)
+    {
+        // Canonical 0 deg unflipped key lets Wayland buffer_transform handle quarter turns
+        // and horizontal flips without rebuilding cached pixels.
+        return BufferTargetSpec {
+            width: scaled_w,
+            height: scaled_h,
+            cache_key: Some(DisplayCacheKey {
+                width: scaled_w,
+                height: scaled_h,
+                angle_bits: angle_key(0.0),
+                flipped: false,
+            }),
+        };
+    }
+
+    BufferTargetSpec {
+        width: frame_w,
+        height: frame_h,
+        cache_key: None,
+    }
+}
+
 /// Computes desired SHM buffer dimensions and optional `display_cache` key for `layout`.
 pub fn compute_buffer_target_spec(
     layout: &OverlayLayout,
@@ -45,55 +110,20 @@ pub fn compute_buffer_target_spec(
 ) -> BufferTargetSpec
 {
     let clamped_scale = buf_scale.max(1) as u32;
-    let (ov_w, ov_h) = layout.overlay_size();
     if let Some(quarter) = layout.quarter_turn()
     {
-        let (frame_w, frame_h) = layout.frame_size();
-        let (scaled_w, scaled_h) = clamped_physical_size(
-            quarter.orient_dimensions(ov_w, ov_h),
+        return compute_quarter_turn_target_spec(
+            layout,
+            quarter,
+            display_cache,
             clamped_scale,
-            (frame_w, frame_h),
+            frame_count,
+            decode_done,
+            fits_source_ram,
         );
-        if (scaled_w, scaled_h) != (frame_w, frame_h)
-        {
-            // Completed single-frame overlays have no animation ticks, so downscale cleanly
-            // with Lanczos3 directly into SHM without occupying DisplayFrameCache slots.
-            if decode_done && frame_count == 1
-            {
-                return BufferTargetSpec {
-                    width: scaled_w,
-                    height: scaled_h,
-                    cache_key: None,
-                };
-            }
-
-            // Multi-frame quarter-turn loops downscale only when source frames exceed RAM budget
-            // and the scaled sequence fits inside `-c display`.
-            if !fits_source_ram
-                && display_cache.would_fit(scaled_w, scaled_h, frame_count, decode_done)
-            {
-                // Canonical 0 deg unflipped key lets Wayland buffer_transform handle quarter turns
-                // and horizontal flips without rebuilding cached pixels.
-                return BufferTargetSpec {
-                    width: scaled_w,
-                    height: scaled_h,
-                    cache_key: Some(DisplayCacheKey {
-                        width: scaled_w,
-                        height: scaled_h,
-                        angle_bits: angle_key(0.0),
-                        flipped: false,
-                    }),
-                };
-            }
-        }
-
-        return BufferTargetSpec {
-            width: frame_w,
-            height: frame_h,
-            cache_key: None,
-        };
     }
 
+    let (ov_w, ov_h) = layout.overlay_size();
     let (target_w, target_h) =
         clamped_physical_size((ov_w, ov_h), clamped_scale, layout.oriented_frame_size());
     BufferTargetSpec {

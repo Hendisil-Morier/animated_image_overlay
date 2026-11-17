@@ -2,7 +2,7 @@
 
 // Standard paths, atomics, thread spawning, and monotonic timing.
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -90,8 +90,6 @@ impl AudioEngine
         let storage_mode = probe.storage_mode(sample_rate, TARGET_PCM_CHANNELS, cap_duration_secs);
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_path = source_path.to_path_buf();
-        let worker_sync = Arc::clone(&sync);
-        let worker_cancel = Arc::clone(&cancel);
 
         let streaming_ring = match storage_mode
         {
@@ -102,29 +100,16 @@ impl AudioEngine
         if let Some(ring) = &streaming_ring
         {
             sync.set_track(AudioTrackData::Streaming(Arc::clone(ring)));
-            // Keep prefill gate closed until ~80 ms decodes (`mark_ready` in stream thread).
-            let worker_ring = Arc::clone(ring);
-            let handle = thread::Builder::new()
-                .name(String::from("aiw-audio-stream"))
-                .spawn(move || {
-                    stream_pcm_to_ring(
-                        &worker_path,
-                        &probe,
-                        sample_rate,
-                        TARGET_PCM_CHANNELS,
-                        cap_duration_secs,
-                        &worker_ring,
-                        &worker_cancel,
-                        || {
-                            worker_sync.mark_ready();
-                            if let Some(cb) = &wakeup
-                            {
-                                cb();
-                            }
-                        },
-                    );
-                })
-                .map_err(|err| AudioError::StreamFailed(err.to_string()))?;
+            let handle = spawn_streaming_worker(
+                worker_path,
+                probe,
+                sample_rate,
+                cap_duration_secs,
+                Arc::clone(ring),
+                Arc::clone(&sync),
+                Arc::clone(&cancel),
+                wakeup,
+            )?;
             return Ok(Self {
                 sync,
                 stream,
@@ -134,31 +119,15 @@ impl AudioEngine
             });
         }
 
-        let handle = thread::Builder::new()
-            .name(String::from("aiw-audio-load"))
-            .spawn(move || {
-                match decode_buffered_pcm(
-                    &worker_path,
-                    &probe,
-                    sample_rate,
-                    TARGET_PCM_CHANNELS,
-                    cap_duration_secs,
-                    &worker_cancel,
-                )
-                {
-                    Ok(samples) => worker_sync.set_track(AudioTrackData::Buffered(samples)),
-                    Err(err) =>
-                    {
-                        tracing::warn!(path = %worker_path.display(), error = %err, "Buffered audio decode failed");
-                        worker_sync.set_track(AudioTrackData::Unavailable);
-                    }
-                }
-                if let Some(cb) = &wakeup
-                {
-                    cb();
-                }
-            })
-            .map_err(|err| AudioError::StreamFailed(err.to_string()))?;
+        let handle = spawn_buffered_worker(
+            worker_path,
+            probe,
+            sample_rate,
+            cap_duration_secs,
+            Arc::clone(&sync),
+            Arc::clone(&cancel),
+            wakeup,
+        )?;
 
         Ok(Self {
             sync,
@@ -234,6 +203,81 @@ impl Drop for AudioEngine
     {
         self.stop();
     }
+}
+
+/// Spawns the background streaming PCM decode thread.
+#[expect(clippy::too_many_arguments)]
+fn spawn_streaming_worker(
+    path: PathBuf,
+    probe: AudioProbe,
+    sample_rate: u32,
+    cap_duration_secs: Option<f64>,
+    ring: Arc<PcmRing>,
+    sync: Arc<AudioSyncCore>,
+    cancel: Arc<AtomicBool>,
+    wakeup: Option<WakeupCallback>,
+) -> Result<JoinHandle<()>, AudioError>
+{
+    thread::Builder::new()
+        .name(String::from("aiw-audio-stream"))
+        .spawn(move || {
+            let on_ready = || {
+                sync.mark_ready();
+                if let Some(cb) = &wakeup
+                {
+                    cb();
+                }
+            };
+            stream_pcm_to_ring(
+                &path,
+                &probe,
+                sample_rate,
+                TARGET_PCM_CHANNELS,
+                cap_duration_secs,
+                &ring,
+                &cancel,
+                on_ready,
+            );
+        })
+        .map_err(|err| AudioError::StreamFailed(err.to_string()))
+}
+
+/// Spawns the background buffered PCM decode thread.
+fn spawn_buffered_worker(
+    path: PathBuf,
+    probe: AudioProbe,
+    sample_rate: u32,
+    cap_duration_secs: Option<f64>,
+    sync: Arc<AudioSyncCore>,
+    cancel: Arc<AtomicBool>,
+    wakeup: Option<WakeupCallback>,
+) -> Result<JoinHandle<()>, AudioError>
+{
+    thread::Builder::new()
+        .name(String::from("aiw-audio-load"))
+        .spawn(move || {
+            match decode_buffered_pcm(
+                &path,
+                &probe,
+                sample_rate,
+                TARGET_PCM_CHANNELS,
+                cap_duration_secs,
+                &cancel,
+            )
+            {
+                Ok(samples) => sync.set_track(AudioTrackData::Buffered(samples)),
+                Err(err) =>
+                {
+                    tracing::warn!(path = %path.display(), error = %err, "Buffered audio decode failed");
+                    sync.set_track(AudioTrackData::Unavailable);
+                }
+            }
+            if let Some(cb) = &wakeup
+            {
+                cb();
+            }
+        })
+        .map_err(|err| AudioError::StreamFailed(err.to_string()))
 }
 
 // Export `write_cpal_output` for deterministic multi-format callback verification in tests.

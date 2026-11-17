@@ -179,6 +179,15 @@ impl ApngPacketReader
         ];
         let _ = checked_argb_byte_len(canvas_w, canvas_h)?;
 
+        // Reject 16-bit APNGs immediately to fail fast without scanning chunks.
+        if ihdr_tail[0] == 16
+        {
+            return Err(decode_err(
+                path,
+                String::from("16-bit color depth is unsupported for animated APNG"),
+            ));
+        }
+
         let mut shared_ancillary = Vec::new();
         let mut saw_actl = false;
         let mut expected_frames = 0_usize;
@@ -223,15 +232,6 @@ impl ApngPacketReader
         if !saw_actl
         {
             return rewind_as_static(path, reader);
-        }
-
-        // Reject 16-bit APNGs cleanly to mirror `image::codecs::png::ApngDecoder`.
-        if ihdr_tail[0] == 16
-        {
-            return Err(decode_err(
-                path,
-                String::from("16-bit color depth is unsupported for animated APNG"),
-            ));
         }
 
         let first_frame_pending = match (pending_fctl, first_idat)

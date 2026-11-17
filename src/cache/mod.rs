@@ -9,6 +9,9 @@ pub mod memory;
 // Warm `.lraw` cache loading and batched background chunk reader.
 pub mod reader;
 
+// On-the-fly chunk decompression and scratch buffer coordination.
+pub(crate) mod decompress;
+
 // Bounded RAM lookahead ring buffer for live-streaming long videos without `.lraw` disk writes.
 mod ring;
 

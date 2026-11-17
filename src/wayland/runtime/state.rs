@@ -280,6 +280,38 @@ impl OverlayRuntime
         self.tick_playback();
     }
 
+    /// Presents initial frame 0 onto the freshly configured layer surface.
+    pub(crate) fn present_initial_frame(&mut self)
+    {
+        let cache_profile = self.cache.cache_profile();
+        let Some(scene) = &mut self.scene
+        else
+        {
+            return;
+        };
+
+        let result = self.cache.with_frame_argb(0, |frame0| {
+            scene.initialize_first_frame(
+                &self.compositor,
+                &self.shm,
+                &self.layout,
+                &self.input,
+                cache_profile,
+                frame0,
+            )
+        });
+
+        match result
+        {
+            Ok(Err(err)) | Err(err) =>
+            {
+                tracing::warn!(error = %err, "Failed presenting initial overlay frame");
+            }
+            Ok(Ok(())) =>
+            {}
+        }
+    }
+
     /// Hides the corner handle when its 2-second idle timer expires while unhovered.
     fn on_fade_timer(&mut self)
     {

@@ -165,21 +165,7 @@ impl LayerShellHandler for OverlayRuntime
         if !self.configured
         {
             self.configured = true;
-            let cache_profile = self.cache.cache_profile();
-            if let Some(scene) = &mut self.scene
-                && let Ok(Err(err)) = self.cache.with_frame_argb(0, |frame0| {
-                    scene.initialize_first_frame(
-                        &self.compositor,
-                        &self.shm,
-                        &self.layout,
-                        &self.input,
-                        cache_profile,
-                        frame0,
-                    )
-                })
-            {
-                tracing::warn!(error = %err, "Failed presenting initial overlay frame");
-            }
+            self.present_initial_frame();
 
             let initial_timer = InputEffects {
                 reset_fade_timer: true,

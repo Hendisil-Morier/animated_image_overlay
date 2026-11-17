@@ -1,12 +1,12 @@
-//! `calloop`-driven Wayland overlay initialization and event-loop runner.
+//! Wayland overlay lifecycle runner for a single display surface instance.
 
 // Process exit status, thread-safe wakeup handle, and monotonic startup time.
-use std::{path::Path, process::ExitCode, sync::Arc, thread, time::Instant};
+use std::{path::Path, sync::Arc, time::Instant};
 
 // `calloop` event loop, ping wakeups, and POSIX signal integration.
 use calloop::{
     EventLoop, LoopHandle,
-    ping::{Ping, PingSource, make_ping},
+    ping::{PingSource, make_ping},
     signals::{Signal, Signals},
 };
 // SCTK globals, compositor, subcompositor, outputs, layer-shell, seat, and SHM support.
@@ -24,13 +24,6 @@ use wayland_client::{
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 
 // Runtime coordinator, input state, monitor resolution, overlay scene, and stats setup.
-use super::{
-    input::InputState,
-    monitor::{MonitorDescriptor, resolve_monitor_index},
-    runtime::OverlayRuntime,
-    scene::OverlayScene,
-    stats::OverlayStats,
-};
 use crate::{
     audio::{AVSyncMode, AudioEngine, AudioProbe},
     cache::{FrameCache, WakeupCallback},
@@ -40,6 +33,13 @@ use crate::{
     error::{OverlayError, WaylandError},
     layout::OverlayLayout,
     playback::PlaybackClock,
+    wayland::{
+        input::InputState,
+        monitor::{MonitorDescriptor, resolve_monitor_index},
+        runtime::OverlayRuntime,
+        scene::OverlayScene,
+        stats::OverlayStats,
+    },
 };
 
 /// Bound Wayland globals required before initializing overlay surfaces and subsurfaces.
@@ -94,148 +94,8 @@ pub fn prepare_signals() -> Result<Signals, OverlayError>
     })
 }
 
-/// Connects to Wayland, validates compositor protocols, and runs one or more overlay loops until exit.
-pub fn run_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayError>
-{
-    if cli.files.is_empty()
-    {
-        return Err(OverlayError::CliValidation(String::from(
-            "At least one input file must be specified",
-        )));
-    }
-
-    if cli.files.len() == 1
-    {
-        run_single_overlay(&cli.files[0], cli, Some(signals), None, None)?;
-        return Ok(ExitCode::SUCCESS);
-    }
-
-    run_multi_overlay(cli, signals)
-}
-
-/// State maintained by the coordinator across parallel overlay worker threads.
-struct CoordinatorState
-{
-    // Count of worker threads that have not yet terminated.
-    remaining_workers: usize,
-
-    // First error encountered by any failing worker overlay.
-    first_error: Option<OverlayError>,
-}
-
-/// Manages multiple concurrent overlay worker threads, routing signals and joining on exit.
-fn run_multi_overlay(cli: &CliArgs, signals: Signals) -> Result<ExitCode, OverlayError>
-{
-    let mut coordinator_loop: EventLoop<CoordinatorState> =
-        EventLoop::try_new().map_err(|err| {
-            WaylandError::EventLoop(format!("Failed creating coordinator event loop: {err}"))
-        })?;
-    let coord_handle = coordinator_loop.handle();
-
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<(), OverlayError>>();
-    let (wake_ping, wake_source) = make_ping().map_err(|err| {
-        WaylandError::EventLoop(format!("Failed creating coordinator wake ping: {err}"))
-    })?;
-
-    let mut exit_pings: Vec<Ping> = Vec::new();
-    let mut thread_handles = Vec::new();
-
-    for file in &cli.files
-    {
-        let (exit_ping, exit_source) = make_ping().map_err(|err| {
-            WaylandError::EventLoop(format!("Failed creating worker exit ping: {err}"))
-        })?;
-        exit_pings.push(exit_ping);
-
-        let file_path = file.clone();
-        let file_label = file.file_name().map(|n| n.to_string_lossy().into_owned());
-        let cli_clone = cli.clone();
-        let tx = done_tx.clone();
-        let p = wake_ping.clone();
-
-        let thread_name = format!(
-            "aiw-{}",
-            file.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("worker")
-        );
-
-        let handle = thread::Builder::new()
-            .name(thread_name)
-            .spawn(move || {
-                let res =
-                    run_single_overlay(&file_path, &cli_clone, None, Some(exit_source), file_label);
-                let _ = tx.send(res);
-                p.ping();
-            })
-            .map_err(|err| {
-                WaylandError::EventLoop(format!("Failed spawning worker thread: {err}"))
-            })?;
-
-        thread_handles.push(handle);
-    }
-
-    drop(done_tx);
-
-    let shared_pings = Arc::new(exit_pings);
-    let pings_for_signals = Arc::clone(&shared_pings);
-    coord_handle
-        .insert_source(signals, move |event, _, _| {
-            tracing::info!(signal = ?event.signal(), "Termination signal received; stopping all overlays");
-            for ping in pings_for_signals.iter()
-            {
-                ping.ping();
-            }
-        })
-        .map_err(|err| WaylandError::EventLoop(err.to_string()))?;
-
-    let pings_for_wake = Arc::clone(&shared_pings);
-    coord_handle
-        .insert_source(wake_source, move |_, _, state| {
-            while let Ok(res) = done_rx.try_recv()
-            {
-                state.remaining_workers = state.remaining_workers.saturating_sub(1);
-                if let Err(err) = res
-                    && state.first_error.is_none()
-                {
-                    tracing::error!(error = %err, "Worker overlay encountered error; closing siblings");
-                    state.first_error = Some(err);
-                    for ping in pings_for_wake.iter()
-                    {
-                        ping.ping();
-                    }
-                }
-            }
-        })
-        .map_err(|err| WaylandError::EventLoop(err.to_string()))?;
-
-    let mut state = CoordinatorState {
-        remaining_workers: cli.files.len(),
-        first_error: None,
-    };
-
-    while state.remaining_workers > 0
-    {
-        coordinator_loop
-            .dispatch(None, &mut state)
-            .map_err(|err| WaylandError::EventLoop(err.to_string()))?;
-    }
-
-    for handle in thread_handles
-    {
-        let _ = handle.join();
-    }
-
-    if let Some(err) = state.first_error
-    {
-        return Err(err);
-    }
-
-    Ok(ExitCode::SUCCESS)
-}
-
 /// Runs a single overlay instance for `file` until exit or external termination.
-fn run_single_overlay(
+pub(crate) fn run_single_overlay(
     file: &Path,
     cli: &CliArgs,
     signals: Option<Signals>,
@@ -415,7 +275,7 @@ fn load_startup_resources(
         audio_prefs.volume = AudioPrefs::clamped_volume(volume);
     }
     audio_prefs.muted |= cli.mute;
-    let audio = open_audio(file, cli, audio_prefs);
+    let audio = open_audio(file, cli, audio_prefs)?;
 
     Ok(StartupResources {
         config_store,
@@ -432,8 +292,13 @@ fn load_startup_resources(
 ///
 /// An explicit `--audio` file loops independently of the visuals, while a video's own track is
 /// realigned to frame 0 at every visual loop wrap.
-fn open_audio(file: &Path, cli: &CliArgs, prefs: AudioPrefs) -> Option<AudioEngine>
+fn open_audio(
+    file: &Path,
+    cli: &CliArgs,
+    prefs: AudioPrefs,
+) -> Result<Option<AudioEngine>, OverlayError>
 {
+    let is_explicit = cli.audio.is_some();
     let (path, mode) = match &cli.audio
     {
         Some(audio) => (audio.clone(), AVSyncMode::IndependentAudioLoop),
@@ -441,21 +306,29 @@ fn open_audio(file: &Path, cli: &CliArgs, prefs: AudioPrefs) -> Option<AudioEngi
         {
             (file.to_path_buf(), AVSyncMode::CoupledLoop)
         }
-        None => return None,
+        None => return Ok(None),
     };
 
     let probe = match AudioProbe::probe_optional(&path)
     {
         Ok(Some(probe)) => probe,
+        Ok(None) if is_explicit =>
+        {
+            return Err(OverlayError::Audio(crate::error::AudioError::ProbeFailed {
+                path,
+                reason: String::from("Explicit --audio file contains no valid audio streams"),
+            }));
+        }
         Ok(None) =>
         {
             tracing::info!(path = %path.display(), "Media file has no audio stream");
-            return None;
+            return Ok(None);
         }
+        Err(err) if is_explicit => return Err(OverlayError::Audio(err)),
         Err(err) =>
         {
             tracing::warn!(error = %err, "Audio probe failed; continuing silently");
-            return None;
+            return Ok(None);
         }
     };
 
@@ -470,11 +343,12 @@ fn open_audio(file: &Path, cli: &CliArgs, prefs: AudioPrefs) -> Option<AudioEngi
         None,
     )
     {
-        Ok(engine) => Some(engine),
+        Ok(engine) => Ok(Some(engine)),
+        Err(err) if is_explicit => Err(OverlayError::Audio(err)),
         Err(err) =>
         {
             tracing::warn!(error = %err, "Audio engine failed to start; continuing silently");
-            None
+            Ok(None)
         }
     }
 }

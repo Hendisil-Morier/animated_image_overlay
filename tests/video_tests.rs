@@ -204,13 +204,14 @@ fn forced_live_video_ring_streams_wraps_across_loops_without_writing_lraw_and_st
     );
 
     let cache_dir = temp.path().join("cache");
-    let mut cache = FrameCache::open_in_dir_with_video_budget(
+    let mut cache = FrameCache::open_in_dir_with_options(
         &mp4_path,
         80,
         0,
         &cache_dir,
         64 * 1024 * 1024,
         0,
+        None,
         30,
         None,
     )
