@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [0.5.1] - 2026-11-17
+
+### Fixed
+
+- Isolated worker thread panic crashes in the multi-overlay coordinator supervisor (`src/wayland/app/supervisor.rs`), catching panics via `std::panic::catch_unwind` and handling channel disconnections to prevent coordinator deadlocks.
+- Ensured explicit `--audio` failures surface immediately as `AudioError::ProbeFailed` rather than silently continuing visual playback without audio.
+
+### Changed
+
+- Decomposed monolithic coordinator and single-overlay execution into `src/wayland/app/{mod,supervisor,runner}.rs`, establishing clean module boundaries.
+- Decomposed monolithic cache store into `src/cache/{mod,store,decompress}.rs`, separating disk decompression from store coordination.
+- Flattened deeply nested control flow blocks in `src/cache/store.rs`, `src/audio/output.rs`, `src/wayland/frame_stage.rs`, and `src/decode/apng/reader.rs`.
+- Removed unused constructor wrappers in `FrameCache` to reduce API bloat.
+
 ## [0.5.0] - 2026-11-17
 
 ### Added
