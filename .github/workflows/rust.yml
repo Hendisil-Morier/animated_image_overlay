@@ -1,3 +1,5 @@
+
+
 name: Rust
 
 on:
@@ -8,7 +10,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-
 jobs:
   build:
 
@@ -16,7 +17,11 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Install ALSA dev libraries
+      run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
     - name: Build
       run: cargo build --verbose
+    - name: Cache
+      uses: actions/cache@v6.1.0
     - name: Run tests
       run: cargo test --verbose
