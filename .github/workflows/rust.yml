@@ -11,46 +11,36 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  build-and-test:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
     name: Build & Test
     runs-on: ubuntu-latest
-
     steps:
+      - uses: actions/checkout@v4
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libasound2-dev \
-            libxkbcommon-dev \
-            libwayland-dev \
-            pkg-config \
-            ffmpeg
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Build
-        run: cargo build --all-features
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Run tests
-        run: cargo nextest run --all-features --no-fail-fast
-
-      - name: Upload test artifacts on failure
-        if: failure()
+            libasound2-dev libxkbcommon-dev libwayland-dev pkg-config ffmpeg
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-features
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --all-features --no-fail-fast --profile ci
+      - if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: test-artifacts
           path: target/nextest/**
           if-no-files-found: ignore
-          retention-days: 7
