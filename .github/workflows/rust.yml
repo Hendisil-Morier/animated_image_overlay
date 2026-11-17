@@ -16,11 +16,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # 2. System libraries required by alsa-sys, smithay-client-toolkit, etc.
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -28,44 +23,34 @@ jobs:
             libasound2-dev \
             libxkbcommon-dev \
             libwayland-dev \
-            pkg-config
+            pkg-config \
+            ffmpeg
 
-      # 3. Rust toolchain (with rustfmt and clippy components)
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      # 4. Cache Cargo registry, git deps, and build artifacts
-      #    rust-cache automatically prunes your own crate's artifacts
-      #    while keeping compiled dependencies, keyed on Cargo.lock, toolchain, etc.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
 
-      # 6. Lint (compiles, catches warnings as errors)
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      # 7. Build
       - name: Build
-        run: cargo build --all-features --verbose
+        run: cargo build --all-features
 
-      # 8. Install cargo-nextest (faster, clearer test runner)
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      # 9. Run tests
       - name: Run tests
         run: cargo nextest run --all-features --no-fail-fast
 
-      # 10. Upload logs / artifacts on failure for debugging
       - name: Upload test artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: test-artifacts
-          path: |
-            target/nextest/**/*.xml
-            target/debug/deps/*.log
+          path: target/nextest/**
           if-no-files-found: ignore
           retention-days: 7
