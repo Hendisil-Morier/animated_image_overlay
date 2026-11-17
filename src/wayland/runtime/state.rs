@@ -216,27 +216,57 @@ impl OverlayRuntime
         clear_timer(&self.loop_handle, &mut self.stats_timer_token);
     }
 
+    /// Logs structured telemetry and prints cold-decode completion when background decoding finishes.
+    pub(crate) fn report_decode_completion_if_ready(
+        &mut self,
+        now: Instant,
+        frame_count: usize,
+        decode_done: bool,
+    )
+    {
+        let Some(stats) = &mut self.stats
+        else
+        {
+            return;
+        };
+        let Some(msg) = stats.check_decode_completion(now, frame_count, decode_done)
+        else
+        {
+            return;
+        };
+
+        tracing::info!(
+            label = self.file_label.as_deref(),
+            frame_count,
+            message = %msg,
+            "Cold background decode completed"
+        );
+        if let Some(label) = &self.file_label
+        {
+            println!("[{label}] {msg}");
+        }
+        else
+        {
+            println!("{msg}");
+        }
+    }
+
     /// Emits a 1-second `--stats` summary line to stdout and reschedules the next sample.
     fn on_stats_timer(&mut self)
     {
         self.stats_timer_token = None;
         let now = Instant::now();
         let snap = self.collect_stats_snapshot();
+        self.report_decode_completion_if_ready(now, snap.frame_count, snap.decode_done);
+
         if let Some(stats) = &mut self.stats
         {
-            if let Some(msg) =
-                stats.check_decode_completion(now, snap.frame_count, snap.decode_done)
-            {
-                if let Some(label) = &self.file_label
-                {
-                    println!("[{label}] {msg}");
-                }
-                else
-                {
-                    println!("{msg}");
-                }
-            }
             let report = stats.take_interval_report(now, snap);
+            tracing::info!(
+                label = self.file_label.as_deref(),
+                report = %report,
+                "Overlay stats report"
+            );
             if let Some(label) = &self.file_label
             {
                 println!("[{label}] {report}");

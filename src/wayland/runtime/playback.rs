@@ -158,16 +158,16 @@ impl OverlayRuntime
     /// Updates `--stats` tick counters and logs cold-decode completion the instant it finishes.
     fn record_tick_stats(&mut self, step: PlaybackStep, frame_count: usize, decode_done: bool)
     {
-        let Some(stats) = &mut self.stats
+        if let Some(stats) = &mut self.stats
+        {
+            stats.record_tick(step);
+        }
         else
         {
             return;
-        };
-        stats.record_tick(step);
-        if let Some(msg) = stats.check_decode_completion(Instant::now(), frame_count, decode_done)
-        {
-            println!("{msg}");
         }
+
+        self.report_decode_completion_if_ready(Instant::now(), frame_count, decode_done);
     }
 
     /// Resamples and atomically commits the current playback frame for updated orientation or scale.
