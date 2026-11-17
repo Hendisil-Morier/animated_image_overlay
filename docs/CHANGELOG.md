@@ -13,6 +13,7 @@ All notable changes to this project are documented here.
 ### Changed
 
 - Enhanced CLI and decoder error reporting: `--gpu <MODE>` validates against supported hardware backends upfront with an actionable supported modes list, and `ffmpeg` stderr reporting strips internal bracketed log headers and deduplicates noise.
+- Enhanced corner handle contrast: composited the bottom-right white interaction handle over an anti-aliased dark drop shadow and ambient contact shadow (`src/wayland/chrome_raster.rs`), ensuring distinct visual definition and immediate grab affordance across solid white and bright backgrounds.
 
 ## [0.4.1] - 2026-11-16
 

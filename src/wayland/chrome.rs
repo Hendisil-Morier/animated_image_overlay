@@ -24,10 +24,10 @@ use wayland_protocols::wp::viewporter::client::{
 // Chrome geometry/rasterizers, layout rects, subsurface/SHM helpers, and input state.
 pub use super::chrome_raster::{
     ChromeGeometry, HANDLE_FADED_ALPHA, HANDLE_HOVER_ALPHA, HANDLE_IDLE_ALPHA,
-    handle_opacity_alpha, needs_chrome_rebuild,
+    fill_rounded_handle_argb, handle_opacity_alpha, needs_chrome_rebuild,
 };
 use super::{
-    chrome_raster::{OUTLINE_ALPHA, OUTLINE_THICKNESS, fill_dashed_argb, fill_rounded_handle_argb},
+    chrome_raster::{OUTLINE_ALPHA, OUTLINE_THICKNESS, fill_dashed_argb},
     input::InputState,
     scene::create_passive_subsurface,
     shm_ring::{create_argb_buffer, shm_pool_err},

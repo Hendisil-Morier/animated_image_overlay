@@ -11,7 +11,10 @@ use animated_image_widget::{
     playback::{PlaybackStep, TickOutcome},
     wayland::{
         MonitorDescriptor, OverlayStats, StatsSnapshot,
-        chrome::{ChromeGeometry, needs_chrome_rebuild},
+        chrome::{
+            ChromeGeometry, HANDLE_FADED_ALPHA, HANDLE_HOVER_ALPHA, HANDLE_IDLE_ALPHA,
+            fill_rounded_handle_argb, needs_chrome_rebuild,
+        },
         resolve_monitor_index, wl_transform_for_orientation,
     },
 };
@@ -322,4 +325,80 @@ fn overlay_stats_tracks_cpu_baselines_and_degenerate_inputs()
     black_box(acc);
     let c1 = OverlayStats::sample_cpu_time();
     assert!(c1 >= c0);
+}
+
+#[test]
+fn handle_rasterizer_draws_drop_shadow_and_contrast_boundary()
+{
+    for (scale, alpha) in [
+        (1, HANDLE_FADED_ALPHA),
+        (1, HANDLE_IDLE_ALPHA),
+        (1, HANDLE_HOVER_ALPHA),
+        (2, HANDLE_HOVER_ALPHA),
+    ]
+    {
+        let geom = ChromeGeometry::for_scale(scale);
+        let size = geom.handle_px;
+        let mut argb = vec![0_u8; (size as usize) * (size as usize) * 4];
+
+        fill_rounded_handle_argb(&mut argb, size, geom.handle_radius_px, alpha);
+
+        let mut shadow_pixels = 0;
+        let mut pill_pixels = 0;
+        let mut min_white_bg_val = 255_u32;
+
+        for py in 0..size
+        {
+            for px in 0..size
+            {
+                let idx = (py * size + px) as usize * 4;
+                let b = argb[idx];
+                let g = argb[idx + 1];
+                let r = argb[idx + 2];
+                let a = argb[idx + 3];
+
+                // Valid premultiplied ARGB8888 invariant: channels must never exceed alpha.
+                assert_eq!(b, g);
+                assert_eq!(g, r);
+                assert!(r <= a, "Premultiplied color {r} exceeds alpha {a}");
+
+                if r == 0 && a > 0
+                {
+                    shadow_pixels += 1;
+                }
+                if r > 0
+                {
+                    pill_pixels += 1;
+                }
+
+                // Simulate Wayland compositor drawing over pure white background (255, 255, 255):
+                // C_out = C_premul + 255 * (1 - A / 255) = r + 255 - a
+                let composited_white = u32::from(r) + 255 - u32::from(a);
+                if composited_white < min_white_bg_val
+                {
+                    min_white_bg_val = composited_white;
+                }
+            }
+        }
+
+        // Shadow pixels must exist outside the white pill to ensure visibility on bright images.
+        assert!(
+            shadow_pixels > 0,
+            "Must have shadow pixels outside the pill (scale={scale}, alpha={alpha})"
+        );
+        // The white pill itself must be present in the center.
+        assert!(
+            pill_pixels > 0,
+            "Must have white pill pixels in the handle body (scale={scale}, alpha={alpha})"
+        );
+        // The composited result on pure white must visibly darken (not blend to 255).
+        assert!(
+            min_white_bg_val < 250,
+            "Handle must create visible contrast on pure white (got min value {min_white_bg_val})"
+        );
+
+        // Top-left outer buffer corner must gracefully fade to zero.
+        let top_left_idx = 0;
+        assert_eq!(argb[top_left_idx + 3], 0);
+    }
 }
