@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [0.5.1] - 2026-11-17
 
+### Added
+
+- Emitted structured `tracing::info!` diagnostics for 1-second interval telemetry reports and cold-decode milestones into rolling daily disk logs, retaining `println!` terminal output when `--stats` is requested.
+
 ### Fixed
 
 - Isolated worker thread panic crashes in the multi-overlay coordinator supervisor (`src/wayland/app/supervisor.rs`), catching panics via `std::panic::catch_unwind` and handling channel disconnections to prevent coordinator deadlocks.
