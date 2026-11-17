@@ -94,9 +94,14 @@ pub enum CliOutcome
 )]
 pub struct CliArgs
 {
-    /// Path to the image or animation file.
-    #[arg(value_name = "FILE", help = "Path to the image or animation file.")]
-    pub file: PathBuf,
+    /// Paths to target animated images, static images, or video files.
+    #[arg(
+        value_name = "FILE",
+        required = true,
+        num_args = 1..,
+        help = "Path(s) to target image, animation, or video file(s)."
+    )]
+    pub files: Vec<PathBuf>,
 
     /// Maximum number of frames to decode (`0` = all frames).
     #[arg(
@@ -394,12 +399,29 @@ impl CliArgs
         Ok(())
     }
 
-    /// Verifies that `self.file` and optional `self.audio` point to existing regular files on disk.
+    /// Verifies that all `self.files` and optional `self.audio` point to existing regular files on disk.
     pub fn validate_file_exists(&self) -> Result<(), OverlayError>
     {
-        if !self.file.is_file()
+        if self.files.is_empty()
         {
-            return Err(OverlayError::MissingInputFile(self.file.clone()));
+            return Err(OverlayError::CliValidation(String::from(
+                "At least one input file must be specified",
+            )));
+        }
+
+        if self.files.len() > 1 && self.audio.is_some()
+        {
+            return Err(OverlayError::CliValidation(String::from(
+                "--audio cannot be used with multiple files (per-file audio configuration is planned for a future release)",
+            )));
+        }
+
+        for file in &self.files
+        {
+            if !file.is_file()
+            {
+                return Err(OverlayError::MissingInputFile(file.clone()));
+            }
         }
 
         if let Some(audio) = &self.audio

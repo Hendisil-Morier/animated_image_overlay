@@ -20,11 +20,11 @@ cargo build --release
 Run the overlay:
 
 ```bash
-./target/release/animated_image_widget FILE [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE] [-c ram=<MB>,display=<MB>,video=<MB>]... [-f MAX_FPS] [--gpu GPU_MODE] [--audio AUDIO_FILE] [--mute] [--volume VOLUME] [-e] [--stats] [-d]
+./target/release/animated_image_widget FILE... [-n MAX_FRAMES] [-w BASE_WIDTH] [-m MONITOR] [-s SCALE] [-c ram=<MB>,display=<MB>,video=<MB>]... [-f MAX_FPS] [--gpu GPU_MODE] [--audio AUDIO_FILE] [--mute] [--volume VOLUME] [-e] [--stats] [-d]
 ```
 
 Options:
-- `FILE`: Path to the image, animation, or video file.
+- `FILE...`: One or more paths to image, animation, or video files to display concurrently.
 - `-n`, `--max-frames`: Maximum number of frames to decode (`0` decodes all frames).
 - `-w`, `--base-width`: Width in pixels used for stored cache frames (default: `500`; never upscales smaller files).
 - `-m`, `--monitor`: Target monitor index or connector name such as `DP-1` (default: `0`).
@@ -32,7 +32,7 @@ Options:
 - `-c`, `--cap`: Repeatable comma-separated memory ceilings in MiB accepting `ram=<MB>`, `display=<MB>`, and `video=<MB>` individually or together (`-c ram=128,display=64,video=512`; defaults: `ram=128,display=64,video=512`). `ram` sets the RAM limit for keeping short animations unpacked in memory (`0` reads from disk); `display` sets display-resolution frame cache; `video` sets the threshold below which short videos cache to `.lraw` on disk while longer videos stream through an in-memory ring buffer.
 - `-f`, `--max-fps`: Maximum playback frame rate in FPS (`1..=1000`, default: `240`).
 - `--gpu`: Hardware-accelerated video decoding mode passed to ffmpeg (default: `auto`; `none` or `off` forces software CPU decoding, or explicit backends such as `cuda`, `vaapi`, `vdpau`, `qsv`, `vulkan`).
-- `--audio`: Companion audio track file (`MP3`, `OGG`, `WAV`, `FLAC`, `AAC`, etc.) played alongside the image or video overlay.
+- `--audio`: Companion audio track file (`MP3`, `OGG`, `WAV`, `FLAC`, `AAC`, etc.) played alongside a single image or video overlay (cannot be used with multiple files).
 - `--mute`: Start playback with audio muted.
 - `--volume`: Initial volume multiplier (`0.0..=1.0`, default: `1.0`).
 - `-e`, `--edit`: Launch directly into interactive edit mode.

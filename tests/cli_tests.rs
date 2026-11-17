@@ -32,7 +32,7 @@ fn cli_applies_default_flags()
         panic!("expected CliOutcome::Run");
     };
 
-    assert_eq!(args.file, PathBuf::from("sample.apng"));
+    assert_eq!(args.files, vec![PathBuf::from("sample.apng")]);
     assert_eq!(args.max_frames, 0);
     assert_eq!(args.base_width, 500);
     assert_eq!(args.monitor, "0");
@@ -96,7 +96,7 @@ fn cli_parses_explicit_flags()
         panic!("expected CliOutcome::Run");
     };
 
-    assert_eq!(args.file, PathBuf::from("sprite.webp"));
+    assert_eq!(args.files, vec![PathBuf::from("sprite.webp")]);
     assert_eq!(args.max_frames, 120);
     assert_eq!(args.base_width, 320);
     assert_eq!(args.monitor, "DP-2");
@@ -164,7 +164,7 @@ fn cli_validates_missing_versus_existing_input_file()
 
     let parsed = CliArgs::parse_and_validate_from(["overlay", existing.to_str().unwrap()])
         .expect("existing regular file should pass validation");
-    assert!(matches!(parsed, CliOutcome::Run(args) if args.file == existing));
+    assert!(matches!(parsed, CliOutcome::Run(args) if args.files == vec![existing.clone()]));
 
     let _ = fs::remove_file(&existing);
 }
@@ -358,4 +358,69 @@ fn cli_parses_gpu_options()
         }
         other => panic!("expected CliValidation, got {other:?}"),
     }
+}
+
+#[test]
+fn cli_parses_multiple_files_and_rejects_audio_with_multi_file()
+{
+    let outcome = CliArgs::parse_flags_from(["overlay", "first.png", "second.gif", "third.mp4"])
+        .expect("multiple positional files should parse");
+    let CliOutcome::Run(args) = outcome
+    else
+    {
+        panic!("expected Run");
+    };
+    assert_eq!(
+        args.files,
+        vec![
+            PathBuf::from("first.png"),
+            PathBuf::from("second.gif"),
+            PathBuf::from("third.mp4"),
+        ]
+    );
+
+    let f1 = unique_temp_path("multi_1.png");
+    let f2 = unique_temp_path("multi_2.png");
+    fs::write(&f1, b"stub").unwrap();
+    fs::write(&f2, b"stub").unwrap();
+
+    let valid_multi =
+        CliArgs::parse_and_validate_from(["overlay", f1.to_str().unwrap(), f2.to_str().unwrap()])
+            .expect("multiple existing files should pass validation");
+    let CliOutcome::Run(multi_args) = valid_multi
+    else
+    {
+        panic!("expected Run");
+    };
+    assert_eq!(multi_args.files.len(), 2);
+
+    let audio_path = unique_temp_path("test_audio.mp3");
+    fs::write(&audio_path, b"stub").unwrap();
+
+    let err = CliArgs::parse_and_validate_from([
+        "overlay",
+        f1.to_str().unwrap(),
+        f2.to_str().unwrap(),
+        "--audio",
+        audio_path.to_str().unwrap(),
+    ])
+    .expect_err("audio flag with multiple files must fail validation");
+
+    assert!(matches!(
+        err,
+        OverlayError::CliValidation(msg) if msg.contains("--audio cannot be used with multiple files")
+    ));
+
+    let missing = unique_temp_path("multi_missing.png");
+    let missing_err = CliArgs::parse_and_validate_from([
+        "overlay",
+        f1.to_str().unwrap(),
+        missing.to_str().unwrap(),
+    ])
+    .expect_err("missing second file must fail validation");
+    assert!(matches!(missing_err, OverlayError::MissingInputFile(p) if p == missing));
+
+    let _ = fs::remove_file(&f1);
+    let _ = fs::remove_file(&f2);
+    let _ = fs::remove_file(&audio_path);
 }

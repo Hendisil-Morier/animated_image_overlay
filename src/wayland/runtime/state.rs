@@ -135,6 +135,9 @@ pub(crate) struct OverlayRuntime
     // Active 1-second periodic `--stats` stdout telemetry timer registration.
     pub(crate) stats_timer_token: Option<RegistrationToken>,
 
+    // Optional display label prefixed to `--stats` telemetry reports in multi-file mode.
+    pub(crate) file_label: Option<String>,
+
     // Termination flag triggered by signals, `q`, middle-click, or compositor layer close.
     pub(crate) exit_requested: bool,
 }
@@ -224,10 +227,24 @@ impl OverlayRuntime
             if let Some(msg) =
                 stats.check_decode_completion(now, snap.frame_count, snap.decode_done)
             {
-                println!("{msg}");
+                if let Some(label) = &self.file_label
+                {
+                    println!("[{label}] {msg}");
+                }
+                else
+                {
+                    println!("{msg}");
+                }
             }
             let report = stats.take_interval_report(now, snap);
-            println!("{report}");
+            if let Some(label) = &self.file_label
+            {
+                println!("[{label}] {report}");
+            }
+            else
+            {
+                println!("{report}");
+            }
         }
         self.schedule_stats_timer_if_enabled();
     }

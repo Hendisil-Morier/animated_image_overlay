@@ -50,8 +50,9 @@ fn main() -> ExitCode
         }
     };
 
+    let file_names: Vec<String> = cli.files.iter().map(|p| p.display().to_string()).collect();
     tracing::info!(
-        file = %cli.file.display(),
+        files = ?file_names,
         max_frames = cli.max_frames,
         base_width = cli.base_width,
         monitor = %cli.monitor,

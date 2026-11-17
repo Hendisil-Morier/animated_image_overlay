@@ -6,6 +6,8 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Concurrent multi-file overlay support via positional `FILE...` arguments (`pub files: Vec<PathBuf>` in `src/cli.rs`), displaying multiple animations or videos simultaneously across dedicated Wayland event loops coordinated by a foreground supervisor that broadcasts `SIGINT`/`SIGTERM` termination pings across all active widgets.
+- Explicit CLI rejection of `--audio` when multiple positional files are supplied, preventing ambiguous audio mixing across simultaneous widgets.
 - Hardware-accelerated video decoding support via `ffmpeg -hwaccel <mode>` controlled by `--gpu <MODE>` (default: `auto`; `none` or `off` forces software CPU decoding, or explicit backends such as `cuda`, `vaapi`, `vdpau`, `qsv`, `vulkan`).
 
 ### Changed
